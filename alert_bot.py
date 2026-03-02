@@ -319,7 +319,7 @@ def check_buy(df_h1: pd.DataFrame) -> Tuple[bool, str]:
 # ==============================
 # /CHECK HANDLER
 # ==============================
-def format_check_report(df_h4: pd.DataFrame, df_h1: pd.DataFrame, df_btc_h4: pd.DataFrame) -> str:
+def format_check_report(df_h4, df_h1, df_btc_h4):
     regime = compute_regime(df_h4, df_btc_h4)
     stop_mode, stop_reason = compute_stop_sell_mode(df_h4)
     zones = compute_zones(df_h4, df_h1)
@@ -330,7 +330,6 @@ def format_check_report(df_h4: pd.DataFrame, df_h1: pd.DataFrame, df_btc_h4: pd.
     sell_ok, sell_reason = check_sell(df_h4, df_h1, regime, stop_mode)
     buy_ok, buy_reason = check_buy(df_h1)
 
-    # Compact sell zones text
     sz_lines = []
     for name, lo, hi in zones["sell_zones"]:
         sz_lines.append(f"- {name}: {lo:.2f} → {hi:.2f}")
@@ -339,26 +338,40 @@ def format_check_report(df_h4: pd.DataFrame, df_h1: pd.DataFrame, df_btc_h4: pd.
     bz_lo, bz_hi = zones["buy_zone"]
 
     d = regime.details
-    report = (
-        f"📌 /check {SYMBOL}\n"
-        f"Time(UTC): H1={df_h1.index[-1].strftime('%Y-%m-%d %H:%M')} | H4={df_h4.index[-1].strftime('%Y-%m-%d %H:%M')}\n\n"
-        f"Price: {zones['price']:.2f}\n\n"
-        f"Regime(H4) score: {regime.score}/4\n"
-        f"- EMA50<EMA200: {d['EMA50_lt_EMA200']}\n"
-        f"- EMA200 slope down: {d['EMA200_slope_down']} (slope={regime.ema200_slope:.6f})\n"
-        f"- Price<EMA200: {d['Price_lt_EMA200']}\n"
-        f"- BTC confirm: {d['BTC_confirm']}\n\n"
-        f"STOP_SELL_MODE: {stop_mode}" + (f" | {stop_reason}\n\n" if stop_mode else "\n\n")
-        f"EMA(H1): EMA50={zones['ema50_h1']:.2f} | EMA200={zones['ema200_h1']:.2f}\n"
-        f"EMA(H4): EMA50={zones['ema50_h4']:.2f} | EMA200={zones['ema200_h4']:.2f}\n"
-        f"RSI: H1={rsi_h1:.1f} | H4={rsi_h4:.1f}\n"
-        f"ATR(H1): {zones['atr_h1']:.2f}\n\n"
-        f"SELL zones (vùng hồi để canh bán):\n{sell_zones_txt}\n\n"
-        f"BUY zone (vùng hỗ trợ để canh mua lại):\n- Support band: {bz_lo:.2f} → {bz_hi:.2f} (support≈{zones['support']:.2f})\n\n"
-        f"Signal now:\n"
-        f"- SELL: {sell_ok} | {sell_reason}\n"
-        f"- BUY:  {buy_ok} | {buy_reason}\n"
-    )
+
+    report = ""
+    report += f"📌 /check {SYMBOL}\n"
+    report += f"Time(UTC): H1={df_h1.index[-1].strftime('%Y-%m-%d %H:%M')} | "
+    report += f"H4={df_h4.index[-1].strftime('%Y-%m-%d %H:%M')}\n\n"
+
+    report += f"Price: {zones['price']:.2f}\n\n"
+
+    report += f"Regime(H4) score: {regime.score}/4\n"
+    report += f"- EMA50<EMA200: {d['EMA50_lt_EMA200']}\n"
+    report += f"- EMA200 slope down: {d['EMA200_slope_down']}\n"
+    report += f"- Price<EMA200: {d['Price_lt_EMA200']}\n"
+    report += f"- BTC confirm: {d['BTC_confirm']}\n\n"
+
+    report += f"STOP_SELL_MODE: {stop_mode}"
+    if stop_mode:
+        report += f" | {stop_reason}"
+    report += "\n\n"
+
+    report += f"EMA(H1): EMA50={zones['ema50_h1']:.2f} | EMA200={zones['ema200_h1']:.2f}\n"
+    report += f"EMA(H4): EMA50={zones['ema50_h4']:.2f} | EMA200={zones['ema200_h4']:.2f}\n"
+    report += f"RSI: H1={rsi_h1:.1f} | H4={rsi_h4:.1f}\n"
+    report += f"ATR(H1): {zones['atr_h1']:.2f}\n\n"
+
+    report += "SELL zones (canh bán khi hồi):\n"
+    report += sell_zones_txt + "\n\n"
+
+    report += "BUY zone (canh mua lại):\n"
+    report += f"- Support band: {bz_lo:.2f} → {bz_hi:.2f}\n\n"
+
+    report += "Signal now:\n"
+    report += f"- SELL: {sell_ok} | {sell_reason}\n"
+    report += f"- BUY: {buy_ok} | {buy_reason}\n"
+
     return report
 
 def handle_telegram_commands(ex, state: dict) -> None:
