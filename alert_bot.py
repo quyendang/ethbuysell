@@ -185,6 +185,7 @@ def main():
 
     while True:
         try:
+            print("Bot alive...")
             df_h4 = fetch_df(ex, SYMBOL, TF_REGIME)
             df_h1 = fetch_df(ex, SYMBOL, TF_ENTRY)
             df_btc = fetch_df(ex, "BTC/USDT", TF_REGIME)
