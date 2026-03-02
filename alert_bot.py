@@ -179,13 +179,13 @@ def main():
     ex = make_exchange()
 
     tg_send(f"Bot started for {SYMBOL}")
-
+    print("Bot started...")
     last_signal_time = None
     stop_mode_prev = False
 
     while True:
         try:
-            print("Bot alive:", pd.Timestamp.now('UTC'))
+            print("Bot alive...")
             df_h4 = fetch_df(ex, SYMBOL, TF_REGIME)
             df_h1 = fetch_df(ex, SYMBOL, TF_ENTRY)
             df_btc = fetch_df(ex, "BTC/USDT", TF_REGIME)
