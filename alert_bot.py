@@ -185,7 +185,7 @@ def main():
 
     while True:
         try:
-            
+            print("Bot alive...")
             df_h4 = fetch_df(ex, SYMBOL, TF_REGIME)
             df_h1 = fetch_df(ex, SYMBOL, TF_ENTRY)
             df_btc = fetch_df(ex, "BTC/USDT", TF_REGIME)
@@ -213,8 +213,7 @@ def main():
                 tg_send(f"BUY SIGNAL {SYMBOL}\nPrice: {df_h1['close'].iloc[-1]:.2f}\n{buy_reason}")
                 last_signal_time = now_bar
 
-            print("Bot alive...")
-            tg_send(f"Bot started for {SYMBOL}")
+            
             time.sleep(CHECK_INTERVAL_SEC)
 
         except Exception as e:
