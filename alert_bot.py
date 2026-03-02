@@ -40,8 +40,7 @@ def tg_send(text: str) -> None:
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML",
+        "text": text,  # plain text
         "disable_web_page_preview": True,
     }
     data = json.dumps(payload).encode("utf-8")
@@ -354,10 +353,10 @@ def main():
             h4_ts = df_h4.index[-1]
             if mode_changed(state, anti.stop_sell_mode, h4_ts):
                 if anti.stop_sell_mode:
-                    tg_send(f"🟠 <b>STOP SELL MODE</b>\nTime(UTC): {h4_ts.strftime('%Y-%m-%d %H:%M')}\nReason: {anti.reason}\n"
+                    tg_send(f"🟠 STOP SELL MODE\nTime(UTC): {h4_ts.strftime('%Y-%m-%d %H:%M')}\nReason: {anti.reason}\n"
                             f"Note: Bot sẽ tạm ngừng gửi SELL signal để tránh bán rồi bị chạy mất trend.")
                 else:
-                    tg_send(f"🟢 <b>SELL MODE RESUMED</b>\nTime(UTC): {h4_ts.strftime('%Y-%m-%d %H:%M')}\n"
+                    tg_send(f"🟢 SELL MODE RESUMED\nTime(UTC): {h4_ts.strftime('%Y-%m-%d %H:%M')}\n"
                             f"Note: Điều kiện anti-miss đã hết, bot tiếp tục lọc SELL theo downtrend.")
 
                 state["stop_sell_mode"] = anti.stop_sell_mode
@@ -379,9 +378,9 @@ def main():
                 )
 
                 tg_send(
-                    f"🚨 <b>{sig.type} SIGNAL</b> ({SYMBOL})\n"
+                    f"🚨 {sig.type} SIGNAL ({SYMBOL})\n"
                     f"Time (UTC): {h1_ts.strftime('%Y-%m-%d %H:%M')}\n"
-                    f"Price: <b>{sig.price:.2f}</b>\n\n"
+                    f"Price: {sig.price:.2f}\n\n"
                     f"{regime_txt}\n"
                     f"Reason: {sig.reason}\n\n"
                     f"Note: Bot chỉ cảnh báo spot (không đặt lệnh)."
