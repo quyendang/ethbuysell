@@ -35,6 +35,10 @@ TG_POLL_TIMEOUT_SEC = int(os.getenv("TG_POLL_TIMEOUT_SEC", "0"))  # keep 0 to av
 
 STATE_FILE = "bot_state.json"
 
+
+SWING_HIGH_LOOKBACK_H1 = int(os.getenv("SWING_HIGH_LOOKBACK_H1", "72"))   # số nến H1 để tìm swing high
+SWING_HIGH_ATR_MULT = float(os.getenv("SWING_HIGH_ATR_MULT", "0.45"))     # độ rộng zone quanh swing high
+
 # ==============================
 # TELEGRAM SAFE SEND + REPLY
 # ==============================
@@ -150,6 +154,16 @@ def slope(series: pd.Series, lookback: int = 12) -> float:
     x = np.arange(len(y))
     return float(np.polyfit(x, y, 1)[0])
 
+
+def swing_high_zone(df_h1: pd.DataFrame, lookback: int, atr_h1: float, atr_mult: float) -> Tuple[float, float, float]:
+    """
+    Returns (swing_high, zone_low, zone_high)
+    swing_high = highest high in last lookback H1 bars (excluding current bar optional)
+    """
+    sub = df_h1.tail(lookback)
+    sh = float(sub["high"].max())
+    width = max(atr_h1 * atr_mult, sh * 0.0015)  # min ~0.15%
+    return sh, sh - width, sh + width
 # ==============================
 # EXCHANGE
 # ==============================
@@ -252,12 +266,11 @@ def compute_zones(df_h4: pd.DataFrame, df_h1: pd.DataFrame) -> Dict[str, Any]:
     atr_h1 = float(atr_series.iloc[-1]) if not np.isnan(atr_series.iloc[-1]) else 0.0
 
     fib_lo, fib_hi = fib_zone_from_swing(df_h1, lookback=96)
-
     support = float(df_h1["low"].tail(72).min())
 
-    # tighter & clearer bands
-    w_sell_h1 = max(atr_h1 * 0.35, price * 0.0015)  # ~0.15% min
-    w_sell_h4 = max(atr_h1 * 0.60, price * 0.0020)  # ~0.20% min
+    # bands (tight H1 / wider H4)
+    w_sell_h1 = max(atr_h1 * 0.35, price * 0.0015)
+    w_sell_h4 = max(atr_h1 * 0.60, price * 0.0020)
     w_buy = max(atr_h1 * 0.80, price * 0.0020)
 
     sell_zone_candidates = [
@@ -266,6 +279,22 @@ def compute_zones(df_h4: pd.DataFrame, df_h1: pd.DataFrame) -> Dict[str, Any]:
     ]
     if not np.isnan(fib_lo) and not np.isnan(fib_hi):
         sell_zone_candidates.append(("FIB_0.5_0.618", fib_lo, fib_hi))
+
+    # ---- Option B: if price already "passed" ALL existing sell zones -> add supply around recent swing high
+    passed_all = True
+    for _, lo, hi in sell_zone_candidates:
+        if price <= hi:  # not "passed"
+            passed_all = False
+            break
+
+    swing_info = None
+    if passed_all and atr_h1 > 0:
+        # Use env if you added, otherwise fallback defaults
+        lookback = int(os.getenv("SWING_HIGH_LOOKBACK_H1", "72"))
+        atr_mult = float(os.getenv("SWING_HIGH_ATR_MULT", "0.45"))
+        sh, zlo, zhi = swing_high_zone(df_h1, lookback=lookback, atr_h1=atr_h1, atr_mult=atr_mult)
+        sell_zone_candidates.append(("SWING_HIGH_SUPPLY", zlo, zhi))
+        swing_info = {"swing_high": sh, "lookback": lookback, "atr_mult": atr_mult}
 
     buy_zone = (support - w_buy, support + w_buy)
 
@@ -280,6 +309,8 @@ def compute_zones(df_h4: pd.DataFrame, df_h1: pd.DataFrame) -> Dict[str, Any]:
         "support": support,
         "sell_zones": sell_zone_candidates,
         "buy_zone": buy_zone,
+        "passed_all_base_zones": passed_all,
+        "swing_info": swing_info,
     }
 
 # ==============================
@@ -289,17 +320,25 @@ def check_sell(df_h4: pd.DataFrame, df_h1: pd.DataFrame, regime: Regime, stop_se
     if not regime.ok or stop_sell_mode:
         return False, "Regime not OK or STOP_SELL_MODE"
 
-    c = df_h1["close"]
-    price = float(c.iloc[-1])
-    rsi_h1 = float(rsi(c, 14).iloc[-1])
-    ema50_h1 = float(ema(c, 50).iloc[-1])
+    zones = compute_zones(df_h4, df_h1)
+    price = zones["price"]
+    rsi_h1 = float(rsi(df_h1["close"], 14).iloc[-1])
 
     low72 = float(df_h1["low"].tail(72).min())
     retrace = (price - low72) / low72 * 100 if low72 > 0 else 0
 
-    # Sell setup: retrace + RSI high + at/above EMA50(H1)
-    if retrace >= 4.0 and rsi_h1 > 62.0 and price >= ema50_h1:
-        return True, f"Retrace={retrace:.1f}% RSI(H1)={rsi_h1:.1f} Price>=EMA50(H1)"
+    # in any sell zone?
+    in_zone = False
+    zone_name = None
+    for name, lo, hi in zones["sell_zones"]:
+        if lo <= price <= hi:
+            in_zone = True
+            zone_name = name
+            break
+
+    if retrace >= 4.0 and rsi_h1 > 62.0 and in_zone:
+        return True, f"Retrace={retrace:.1f}% RSI(H1)={rsi_h1:.1f} InZone={zone_name}"
+
     return False, "No SELL setup"
 
 def check_buy(df_h1: pd.DataFrame) -> Tuple[bool, str]:
@@ -410,6 +449,10 @@ def format_check_report(df_h4: pd.DataFrame, df_h1: pd.DataFrame, df_btc_h4: pd.
     report += f"Distance to EMA50(H1): {dist_ema50_h1_pct:+.2f}% ({dist_ema50_h1_atr:+.2f} ATR)\n"
     report += f"Distance to EMA50(H4): {dist_ema50_h4_pct:+.2f}% ({dist_ema50_h4_atr:+.2f} ATR)\n\n"
 
+    if zones.get("swing_info"):
+        si = zones["swing_info"]
+        report += f"Breakout mode: SWING_HIGH_SUPPLY enabled (lookback={si['lookback']} H1, width={si['atr_mult']} ATR)\n\n"
+
     report += "SELL zones (canh bán khi hồi):\n"
     report += sell_zones_txt + "\n\n"
 
@@ -419,7 +462,9 @@ def format_check_report(df_h4: pd.DataFrame, df_h1: pd.DataFrame, df_btc_h4: pd.
     report += "Requirements (để ra tín hiệu):\n"
     report += f"- SELL needs: RSI +{need_rsi_sell:.1f} (to 62), retrace +{need_retrace_sell:.2f}% (to 4%), inSellZone={not need_zone_sell}\n"
     report += f"- BUY  needs: RSI -{need_rsi_buy:.1f} (to 38) OR drop +{need_drop_buy:.2f}% (to 6%) OR inBuyZone={not need_zone_buy}\n\n"
-
+    if zones.get("passed_all_base_zones", False):
+        report += "- Note: Price has passed EMA/FIB zones; using SWING_HIGH_SUPPLY as next sell area.\n"
+        
     report += "Signal now:\n"
     report += f"- SELL: {sell_ok} | {sell_reason}"
     if in_sell_zone:
