@@ -241,11 +241,6 @@ def fib_zone_from_swing(df: pd.DataFrame, lookback: int = 96) -> Tuple[float, fl
     return float(lo), float(hi)
 
 def compute_zones(df_h4: pd.DataFrame, df_h1: pd.DataFrame) -> Dict[str, Any]:
-    """
-    Zones based on your conditions:
-    - SELL zone: near EMA50(H1) or EMA50(H4) or Fib 0.5-0.618 (H1 swing), when regime down.
-    - BUY zone: near recent support (recent swing low area) and RSI low.
-    """
     price = float(df_h1["close"].iloc[-1])
 
     ema50_h1 = float(ema(df_h1["close"], 50).iloc[-1])
@@ -253,20 +248,22 @@ def compute_zones(df_h4: pd.DataFrame, df_h1: pd.DataFrame) -> Dict[str, Any]:
     ema50_h4 = float(ema(df_h4["close"], 50).iloc[-1])
     ema200_h4 = float(ema(df_h4["close"], 200).iloc[-1])
 
-    atr_h1 = float(atr(df_h1, 14).iloc[-1]) if not np.isnan(atr(df_h1, 14).iloc[-1]) else 0.0
+    atr_series = atr(df_h1, 14)
+    atr_h1 = float(atr_series.iloc[-1]) if not np.isnan(atr_series.iloc[-1]) else 0.0
 
     fib_lo, fib_hi = fib_zone_from_swing(df_h1, lookback=96)
 
-    # Support proxy: lowest low last 72 H1 bars
     support = float(df_h1["low"].tail(72).min())
 
-    # Suggest a band (zone width uses ATR)
-    w_sell = max(atr_h1 * 0.6, price * 0.002)  # ~0.2% min
-    w_buy = max(atr_h1 * 0.8, price * 0.002)
+    # tighter & clearer bands
+    w_sell_h1 = max(atr_h1 * 0.35, price * 0.0015)  # ~0.15% min
+    w_sell_h4 = max(atr_h1 * 0.60, price * 0.0020)  # ~0.20% min
+    w_buy = max(atr_h1 * 0.80, price * 0.0020)
 
-    sell_zone_candidates = []
-    sell_zone_candidates.append(("EMA50_H1", ema50_h1 - w_sell, ema50_h1 + w_sell))
-    sell_zone_candidates.append(("EMA50_H4", ema50_h4 - w_sell, ema50_h4 + w_sell))
+    sell_zone_candidates = [
+        ("EMA50_H1", ema50_h1 - w_sell_h1, ema50_h1 + w_sell_h1),
+        ("EMA50_H4", ema50_h4 - w_sell_h4, ema50_h4 + w_sell_h4),
+    ]
     if not np.isnan(fib_lo) and not np.isnan(fib_hi):
         sell_zone_candidates.append(("FIB_0.5_0.618", fib_lo, fib_hi))
 
@@ -319,36 +316,84 @@ def check_buy(df_h1: pd.DataFrame) -> Tuple[bool, str]:
 # ==============================
 # /CHECK HANDLER
 # ==============================
-def format_check_report(df_h4, df_h1, df_btc_h4):
+def format_check_report(df_h4: pd.DataFrame, df_h1: pd.DataFrame, df_btc_h4: pd.DataFrame) -> str:
     regime = compute_regime(df_h4, df_btc_h4)
     stop_mode, stop_reason = compute_stop_sell_mode(df_h4)
     zones = compute_zones(df_h4, df_h1)
 
+    price = zones["price"]
+    atr_h1 = zones["atr_h1"] if zones["atr_h1"] > 0 else 1e-9
+
     rsi_h1 = float(rsi(df_h1["close"], 14).iloc[-1])
     rsi_h4 = float(rsi(df_h4["close"], 14).iloc[-1])
+
+    # retrace from last 72 H1 low
+    low72 = float(df_h1["low"].tail(72).min())
+    retrace72 = (price - low72) / low72 * 100 if low72 > 0 else 0.0
+
+    # distances (percent + ATR multiple)
+    ema50_h1 = zones["ema50_h1"]
+    ema50_h4 = zones["ema50_h4"]
+    dist_ema50_h1_pct = (price - ema50_h1) / ema50_h1 * 100 if ema50_h1 else 0.0
+    dist_ema50_h4_pct = (price - ema50_h4) / ema50_h4 * 100 if ema50_h4 else 0.0
+    dist_ema50_h1_atr = (price - ema50_h1) / atr_h1
+    dist_ema50_h4_atr = (price - ema50_h4) / atr_h1
+
+    # drop from last 24h high
+    high24 = float(df_h1["high"].tail(24).max())
+    drop24 = (high24 - price) / high24 * 100 if high24 > 0 else 0.0
+
+    # in any sell zone?
+    in_sell_zone = False
+    in_zone_name = None
+    for name, lo, hi in zones["sell_zones"]:
+        if lo <= price <= hi:
+            in_sell_zone = True
+            in_zone_name = name
+            break
+
+    # in buy zone?
+    bz_lo, bz_hi = zones["buy_zone"]
+    in_buy_zone = (bz_lo <= price <= bz_hi)
 
     sell_ok, sell_reason = check_sell(df_h4, df_h1, regime, stop_mode)
     buy_ok, buy_reason = check_buy(df_h1)
 
+    # requirements
+    need_rsi_sell = max(0.0, 62.0 - rsi_h1)
+    need_retrace_sell = max(0.0, 4.0 - retrace72)
+    need_zone_sell = not in_sell_zone
+
+    need_rsi_buy = max(0.0, rsi_h1 - 38.0)  # need RSI <= 38
+    need_drop_buy = max(0.0, 6.0 - drop24)  # need drop >= 6
+    need_zone_buy = not in_buy_zone
+
+    # sell zones text + position tag
     sz_lines = []
     for name, lo, hi in zones["sell_zones"]:
-        sz_lines.append(f"- {name}: {lo:.2f} → {hi:.2f}")
+        tag = ""
+        if price > hi:
+            tag = " (passed)"
+        elif price < lo:
+            tag = " (below)"
+        else:
+            tag = " (INSIDE)"
+        sz_lines.append(f"- {name}: {lo:.2f} → {hi:.2f}{tag}")
     sell_zones_txt = "\n".join(sz_lines)
-
-    bz_lo, bz_hi = zones["buy_zone"]
 
     d = regime.details
 
     report = ""
     report += f"📌 /check {SYMBOL}\n"
-    report += f"Time(UTC): H1={df_h1.index[-1].strftime('%Y-%m-%d %H:%M')} | "
-    report += f"H4={df_h4.index[-1].strftime('%Y-%m-%d %H:%M')}\n\n"
+    report += f"Time(UTC): H1={df_h1.index[-1].strftime('%Y-%m-%d %H:%M')} | H4={df_h4.index[-1].strftime('%Y-%m-%d %H:%M')}\n\n"
 
-    report += f"Price: {zones['price']:.2f}\n\n"
+    report += f"Price: {price:.2f}\n"
+    report += f"Retrace(72xH1): {retrace72:.2f}% (from low {low72:.2f})\n"
+    report += f"Drop(24xH1 high): {drop24:.2f}% (from high {high24:.2f})\n\n"
 
     report += f"Regime(H4) score: {regime.score}/4\n"
     report += f"- EMA50<EMA200: {d['EMA50_lt_EMA200']}\n"
-    report += f"- EMA200 slope down: {d['EMA200_slope_down']}\n"
+    report += f"- EMA200 slope down: {d['EMA200_slope_down']} (slope={regime.ema200_slope:.6f})\n"
     report += f"- Price<EMA200: {d['Price_lt_EMA200']}\n"
     report += f"- BTC confirm: {d['BTC_confirm']}\n\n"
 
@@ -362,15 +407,25 @@ def format_check_report(df_h4, df_h1, df_btc_h4):
     report += f"RSI: H1={rsi_h1:.1f} | H4={rsi_h4:.1f}\n"
     report += f"ATR(H1): {zones['atr_h1']:.2f}\n\n"
 
+    report += f"Distance to EMA50(H1): {dist_ema50_h1_pct:+.2f}% ({dist_ema50_h1_atr:+.2f} ATR)\n"
+    report += f"Distance to EMA50(H4): {dist_ema50_h4_pct:+.2f}% ({dist_ema50_h4_atr:+.2f} ATR)\n\n"
+
     report += "SELL zones (canh bán khi hồi):\n"
     report += sell_zones_txt + "\n\n"
 
     report += "BUY zone (canh mua lại):\n"
-    report += f"- Support band: {bz_lo:.2f} → {bz_hi:.2f}\n\n"
+    report += f"- Support band: {bz_lo:.2f} → {bz_hi:.2f}" + (" (INSIDE)\n\n" if in_buy_zone else " (outside)\n\n")
+
+    report += "Requirements (để ra tín hiệu):\n"
+    report += f"- SELL needs: RSI +{need_rsi_sell:.1f} (to 62), retrace +{need_retrace_sell:.2f}% (to 4%), inSellZone={not need_zone_sell}\n"
+    report += f"- BUY  needs: RSI -{need_rsi_buy:.1f} (to 38) OR drop +{need_drop_buy:.2f}% (to 6%) OR inBuyZone={not need_zone_buy}\n\n"
 
     report += "Signal now:\n"
-    report += f"- SELL: {sell_ok} | {sell_reason}\n"
-    report += f"- BUY: {buy_ok} | {buy_reason}\n"
+    report += f"- SELL: {sell_ok} | {sell_reason}"
+    if in_sell_zone:
+        report += f" | price is inside {in_zone_name}"
+    report += "\n"
+    report += f"- BUY:  {buy_ok} | {buy_reason}\n"
 
     return report
 
