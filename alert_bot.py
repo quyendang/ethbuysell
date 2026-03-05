@@ -18,29 +18,29 @@ from urllib.error import HTTPError, URLError
 load_dotenv()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()  # for push alerts (optional for /check replies)
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()  # push alerts
 EXCHANGE_NAME = os.getenv("EXCHANGE", "binance").strip()
 SYMBOL = os.getenv("SYMBOL", "ETH/USDT").strip()
 CHECK_INTERVAL_SEC = int(os.getenv("CHECK_INTERVAL_SEC", "60"))
 
-TF_REGIME = "4h"   # H4 regime
-TF_ENTRY = "1h"    # H1 timing
+TF_REGIME = "4h"
+TF_ENTRY = "1h"
 
 # Anti-miss
 ANTI_MISS_RSI_H4 = float(os.getenv("ANTI_MISS_RSI_H4", "55"))
 ANTI_MISS_DIST_BARS = int(os.getenv("ANTI_MISS_DIST_BARS", "6"))
 
-# Telegram polling
-TG_POLL_TIMEOUT_SEC = int(os.getenv("TG_POLL_TIMEOUT_SEC", "0"))  # keep 0 to avoid long blocking in Koyeb loop
+# Swing supply (Option B)
+SWING_HIGH_LOOKBACK_H1 = int(os.getenv("SWING_HIGH_LOOKBACK_H1", "72"))
+SWING_HIGH_ATR_MULT = float(os.getenv("SWING_HIGH_ATR_MULT", "0.45"))
+
+# Telegram polling (keep 0 to avoid blocking)
+TG_POLL_TIMEOUT_SEC = int(os.getenv("TG_POLL_TIMEOUT_SEC", "0"))
 
 STATE_FILE = "bot_state.json"
 
-
-SWING_HIGH_LOOKBACK_H1 = int(os.getenv("SWING_HIGH_LOOKBACK_H1", "72"))   # số nến H1 để tìm swing high
-SWING_HIGH_ATR_MULT = float(os.getenv("SWING_HIGH_ATR_MULT", "0.45"))     # độ rộng zone quanh swing high
-
 # ==============================
-# TELEGRAM SAFE SEND + REPLY
+# TELEGRAM (SAFE)
 # ==============================
 def tg_api(method: str, payload: dict, timeout: int = 20) -> dict:
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}"
@@ -54,7 +54,7 @@ def tg_api(method: str, payload: dict, timeout: int = 20) -> dict:
         return {"ok": False, "raw": raw}
 
 def tg_send(text: str, chat_id: Optional[str] = None) -> None:
-    """Send plain text. Never crash the bot if Telegram fails."""
+    """Send plain text; never crash bot."""
     if not TELEGRAM_BOT_TOKEN:
         print("[TELEGRAM ERROR] Missing TELEGRAM_BOT_TOKEN")
         return
@@ -85,7 +85,6 @@ def tg_send(text: str, chat_id: Optional[str] = None) -> None:
         print(f"[TELEGRAM ERROR] {type(e).__name__}: {e}")
 
 def tg_get_updates(offset: Optional[int]) -> dict:
-    """Poll Telegram updates (non-blocking by default)."""
     payload = {"timeout": TG_POLL_TIMEOUT_SEC}
     if offset is not None:
         payload["offset"] = offset
@@ -154,16 +153,6 @@ def slope(series: pd.Series, lookback: int = 12) -> float:
     x = np.arange(len(y))
     return float(np.polyfit(x, y, 1)[0])
 
-
-def swing_high_zone(df_h1: pd.DataFrame, lookback: int, atr_h1: float, atr_mult: float) -> Tuple[float, float, float]:
-    """
-    Returns (swing_high, zone_low, zone_high)
-    swing_high = highest high in last lookback H1 bars (excluding current bar optional)
-    """
-    sub = df_h1.tail(lookback)
-    sh = float(sub["high"].max())
-    width = max(atr_h1 * atr_mult, sh * 0.0015)  # min ~0.15%
-    return sh, sh - width, sh + width
 # ==============================
 # EXCHANGE
 # ==============================
@@ -227,7 +216,7 @@ def compute_stop_sell_mode(df_h4: pd.DataFrame) -> Tuple[bool, str]:
     if close_now > ema200_now:
         return True, f"Close(H4) {close_now:.2f} > EMA200(H4) {ema200_now:.2f}"
 
-    # B) weakening downtrend (distance shrinking + RSI rising)
+    # B) weakening downtrend
     dist = (ema200 - ema50).dropna().tail(ANTI_MISS_DIST_BARS + 1)
     shrinking = False
     if len(dist) >= ANTI_MISS_DIST_BARS + 1:
@@ -239,7 +228,7 @@ def compute_stop_sell_mode(df_h4: pd.DataFrame) -> Tuple[bool, str]:
     return False, ""
 
 # ==============================
-# BUYZONE / SELLZONE (explainable)
+# ZONES
 # ==============================
 def fib_zone_from_swing(df: pd.DataFrame, lookback: int = 96) -> Tuple[float, float]:
     sub = df.tail(lookback)
@@ -253,6 +242,12 @@ def fib_zone_from_swing(df: pd.DataFrame, lookback: int = 96) -> Tuple[float, fl
     lo = min(z50, z618)
     hi = max(z50, z618)
     return float(lo), float(hi)
+
+def swing_high_zone(df_h1: pd.DataFrame, lookback: int, atr_h1: float, atr_mult: float) -> Tuple[float, float, float]:
+    sub = df_h1.tail(lookback)
+    sh = float(sub["high"].max())
+    width = max(atr_h1 * atr_mult, sh * 0.0015)
+    return sh, sh - width, sh + width
 
 def compute_zones(df_h4: pd.DataFrame, df_h1: pd.DataFrame) -> Dict[str, Any]:
     price = float(df_h1["close"].iloc[-1])
@@ -268,7 +263,6 @@ def compute_zones(df_h4: pd.DataFrame, df_h1: pd.DataFrame) -> Dict[str, Any]:
     fib_lo, fib_hi = fib_zone_from_swing(df_h1, lookback=96)
     support = float(df_h1["low"].tail(72).min())
 
-    # bands (tight H1 / wider H4)
     w_sell_h1 = max(atr_h1 * 0.35, price * 0.0015)
     w_sell_h4 = max(atr_h1 * 0.60, price * 0.0020)
     w_buy = max(atr_h1 * 0.80, price * 0.0020)
@@ -280,21 +274,18 @@ def compute_zones(df_h4: pd.DataFrame, df_h1: pd.DataFrame) -> Dict[str, Any]:
     if not np.isnan(fib_lo) and not np.isnan(fib_hi):
         sell_zone_candidates.append(("FIB_0.5_0.618", fib_lo, fib_hi))
 
-    # ---- Option B: if price already "passed" ALL existing sell zones -> add supply around recent swing high
+    # Option B: if price already passed ALL base sell zones -> add swing high supply
     passed_all = True
     for _, lo, hi in sell_zone_candidates:
-        if price <= hi:  # not "passed"
+        if price <= hi:
             passed_all = False
             break
 
     swing_info = None
     if passed_all and atr_h1 > 0:
-        # Use env if you added, otherwise fallback defaults
-        lookback = int(os.getenv("SWING_HIGH_LOOKBACK_H1", "72"))
-        atr_mult = float(os.getenv("SWING_HIGH_ATR_MULT", "0.45"))
-        sh, zlo, zhi = swing_high_zone(df_h1, lookback=lookback, atr_h1=atr_h1, atr_mult=atr_mult)
+        sh, zlo, zhi = swing_high_zone(df_h1, lookback=SWING_HIGH_LOOKBACK_H1, atr_h1=atr_h1, atr_mult=SWING_HIGH_ATR_MULT)
         sell_zone_candidates.append(("SWING_HIGH_SUPPLY", zlo, zhi))
-        swing_info = {"swing_high": sh, "lookback": lookback, "atr_mult": atr_mult}
+        swing_info = {"swing_high": sh, "lookback": SWING_HIGH_LOOKBACK_H1, "atr_mult": SWING_HIGH_ATR_MULT}
 
     buy_zone = (support - w_buy, support + w_buy)
 
@@ -314,7 +305,7 @@ def compute_zones(df_h4: pd.DataFrame, df_h1: pd.DataFrame) -> Dict[str, Any]:
     }
 
 # ==============================
-# SIGNAL CHECKS (simple but safe)
+# SIGNAL CHECKS
 # ==============================
 def check_sell(df_h4: pd.DataFrame, df_h1: pd.DataFrame, regime: Regime, stop_sell_mode: bool) -> Tuple[bool, str]:
     if not regime.ok or stop_sell_mode:
@@ -325,9 +316,9 @@ def check_sell(df_h4: pd.DataFrame, df_h1: pd.DataFrame, regime: Regime, stop_se
     rsi_h1 = float(rsi(df_h1["close"], 14).iloc[-1])
 
     low72 = float(df_h1["low"].tail(72).min())
-    retrace = (price - low72) / low72 * 100 if low72 > 0 else 0
+    retrace72 = (price - low72) / low72 * 100 if low72 > 0 else 0.0
 
-    # in any sell zone?
+    # must be inside a sell zone
     in_zone = False
     zone_name = None
     for name, lo, hi in zones["sell_zones"]:
@@ -336,24 +327,41 @@ def check_sell(df_h4: pd.DataFrame, df_h1: pd.DataFrame, regime: Regime, stop_se
             zone_name = name
             break
 
-    if retrace >= 4.0 and rsi_h1 > 62.0 and in_zone:
-        return True, f"Retrace={retrace:.1f}% RSI(H1)={rsi_h1:.1f} InZone={zone_name}"
+    if retrace72 >= 4.0 and rsi_h1 > 62.0 and in_zone:
+        return True, f"Retrace72={retrace72:.1f}% RSI(H1)={rsi_h1:.1f} InZone={zone_name}"
 
     return False, "No SELL setup"
 
-def check_buy(df_h1: pd.DataFrame) -> Tuple[bool, str]:
+def check_buy(df_h1: pd.DataFrame, df_h4: pd.DataFrame) -> Tuple[bool, str]:
+    """
+    FIXED: BUY requires momentum trigger AND location filter.
+    trigger = RSI<38 OR Drop24>=6
+    location = near EMA200(H1) OR in buyzone
+    """
     c = df_h1["close"]
     price = float(c.iloc[-1])
     rsi_h1 = float(rsi(c, 14).iloc[-1])
-    high24 = float(df_h1["high"].tail(24).max())
-    drop = (high24 - price) / high24 * 100 if high24 > 0 else 0
 
-    if rsi_h1 < 38.0 or drop >= 6.0:
-        return True, f"RSI(H1)={rsi_h1:.1f} DropFrom24hHigh={drop:.1f}%"
-    return False, "No BUY setup"
+    high24 = float(df_h1["high"].tail(24).max())
+    drop24 = (high24 - price) / high24 * 100 if high24 > 0 else 0.0
+
+    trigger = (rsi_h1 < 38.0) or (drop24 >= 6.0)
+
+    ema200_h1 = float(ema(c, 200).iloc[-1])
+    atr_h1 = float(atr(df_h1, 14).iloc[-1])
+    zones = compute_zones(df_h4, df_h1)
+    bz_lo, bz_hi = zones["buy_zone"]
+    in_buy_zone = (bz_lo <= price <= bz_hi)
+
+    near_ema200 = price <= (ema200_h1 + 0.25 * atr_h1)
+
+    if trigger and (near_ema200 or in_buy_zone):
+        return True, f"BUY: trigger=True (RSI={rsi_h1:.1f}, Drop24={drop24:.2f}%), nearEMA200={near_ema200}, inBuyZone={in_buy_zone}"
+
+    return False, f"No BUY: trigger={trigger} (RSI={rsi_h1:.1f}, Drop24={drop24:.2f}%), nearEMA200={near_ema200}, inBuyZone={in_buy_zone}"
 
 # ==============================
-# /CHECK HANDLER
+# /CHECK REPORT
 # ==============================
 def format_check_report(df_h4: pd.DataFrame, df_h1: pd.DataFrame, df_btc_h4: pd.DataFrame) -> str:
     regime = compute_regime(df_h4, df_btc_h4)
@@ -366,11 +374,12 @@ def format_check_report(df_h4: pd.DataFrame, df_h1: pd.DataFrame, df_btc_h4: pd.
     rsi_h1 = float(rsi(df_h1["close"], 14).iloc[-1])
     rsi_h4 = float(rsi(df_h4["close"], 14).iloc[-1])
 
-    # retrace from last 72 H1 low
     low72 = float(df_h1["low"].tail(72).min())
     retrace72 = (price - low72) / low72 * 100 if low72 > 0 else 0.0
 
-    # distances (percent + ATR multiple)
+    high24 = float(df_h1["high"].tail(24).max())
+    drop24 = (high24 - price) / high24 * 100 if high24 > 0 else 0.0
+
     ema50_h1 = zones["ema50_h1"]
     ema50_h4 = zones["ema50_h4"]
     dist_ema50_h1_pct = (price - ema50_h1) / ema50_h1 * 100 if ema50_h1 else 0.0
@@ -378,11 +387,7 @@ def format_check_report(df_h4: pd.DataFrame, df_h1: pd.DataFrame, df_btc_h4: pd.
     dist_ema50_h1_atr = (price - ema50_h1) / atr_h1
     dist_ema50_h4_atr = (price - ema50_h4) / atr_h1
 
-    # drop from last 24h high
-    high24 = float(df_h1["high"].tail(24).max())
-    drop24 = (high24 - price) / high24 * 100 if high24 > 0 else 0.0
-
-    # in any sell zone?
+    # in sell zone?
     in_sell_zone = False
     in_zone_name = None
     for name, lo, hi in zones["sell_zones"]:
@@ -395,22 +400,25 @@ def format_check_report(df_h4: pd.DataFrame, df_h1: pd.DataFrame, df_btc_h4: pd.
     bz_lo, bz_hi = zones["buy_zone"]
     in_buy_zone = (bz_lo <= price <= bz_hi)
 
+    # near EMA200 for buy location filter
+    ema200_h1 = zones["ema200_h1"]
+    near_ema200_buy = price <= (ema200_h1 + 0.25 * zones["atr_h1"])
+
     sell_ok, sell_reason = check_sell(df_h4, df_h1, regime, stop_mode)
-    buy_ok, buy_reason = check_buy(df_h1)
+    buy_ok, buy_reason = check_buy(df_h1, df_h4)
 
     # requirements
     need_rsi_sell = max(0.0, 62.0 - rsi_h1)
     need_retrace_sell = max(0.0, 4.0 - retrace72)
     need_zone_sell = not in_sell_zone
 
-    need_rsi_buy = max(0.0, rsi_h1 - 38.0)  # need RSI <= 38
-    need_drop_buy = max(0.0, 6.0 - drop24)  # need drop >= 6
-    need_zone_buy = not in_buy_zone
+    need_rsi_buy = max(0.0, rsi_h1 - 38.0)
+    need_drop_buy = max(0.0, 6.0 - drop24)
+    need_loc_buy = not (in_buy_zone or near_ema200_buy)
 
-    # sell zones text + position tag
+    # zones text + tags
     sz_lines = []
     for name, lo, hi in zones["sell_zones"]:
-        tag = ""
         if price > hi:
             tag = " (passed)"
         elif price < lo:
@@ -451,7 +459,11 @@ def format_check_report(df_h4: pd.DataFrame, df_h1: pd.DataFrame, df_btc_h4: pd.
 
     if zones.get("swing_info"):
         si = zones["swing_info"]
-        report += f"Breakout mode: SWING_HIGH_SUPPLY enabled (lookback={si['lookback']} H1, width={si['atr_mult']} ATR)\n\n"
+        report += f"Breakout mode: SWING_HIGH_SUPPLY enabled (lookback={si['lookback']} H1, width={si['atr_mult']} ATR)\n"
+    if zones.get("passed_all_base_zones", False):
+        report += "Note: Price has passed EMA/FIB zones; using SWING_HIGH_SUPPLY as next sell area when available.\n"
+    if zones.get("swing_info") or zones.get("passed_all_base_zones", False):
+        report += "\n"
 
     report += "SELL zones (canh bán khi hồi):\n"
     report += sell_zones_txt + "\n\n"
@@ -461,10 +473,9 @@ def format_check_report(df_h4: pd.DataFrame, df_h1: pd.DataFrame, df_btc_h4: pd.
 
     report += "Requirements (để ra tín hiệu):\n"
     report += f"- SELL needs: RSI +{need_rsi_sell:.1f} (to 62), retrace +{need_retrace_sell:.2f}% (to 4%), inSellZone={not need_zone_sell}\n"
-    report += f"- BUY  needs: RSI -{need_rsi_buy:.1f} (to 38) OR drop +{need_drop_buy:.2f}% (to 6%) OR inBuyZone={not need_zone_buy}\n\n"
-    if zones.get("passed_all_base_zones", False):
-        report += "- Note: Price has passed EMA/FIB zones; using SWING_HIGH_SUPPLY as next sell area.\n"
-        
+    report += f"- BUY  needs: trigger(RSI<=38 OR drop>=6) AND location(nearEMA200 OR inBuyZone). "
+    report += f"Now: RSI -{need_rsi_buy:.1f} (to 38) OR drop +{need_drop_buy:.2f}% (to 6%), locationOK={not need_loc_buy}\n\n"
+
     report += "Signal now:\n"
     report += f"- SELL: {sell_ok} | {sell_reason}"
     if in_sell_zone:
@@ -474,11 +485,10 @@ def format_check_report(df_h4: pd.DataFrame, df_h1: pd.DataFrame, df_btc_h4: pd.
 
     return report
 
+# ==============================
+# TELEGRAM COMMANDS
+# ==============================
 def handle_telegram_commands(ex, state: dict) -> None:
-    """
-    Read new updates; if /check -> reply with computed report to the sender chat_id.
-    Uses state['tg_update_offset'] for de-dup.
-    """
     offset = state.get("tg_update_offset", None)
     resp = tg_get_updates(offset)
     if not resp.get("ok", False):
@@ -488,7 +498,6 @@ def handle_telegram_commands(ex, state: dict) -> None:
     if not updates:
         return
 
-    # Update offset to last_update_id + 1
     last_id = updates[-1].get("update_id")
     if last_id is not None:
         state["tg_update_offset"] = int(last_id) + 1
@@ -507,7 +516,6 @@ def handle_telegram_commands(ex, state: dict) -> None:
 
         if text.startswith("/check"):
             try:
-                # Fetch fresh data on demand
                 df_h4 = fetch_df(ex, SYMBOL, TF_REGIME, limit=300)
                 df_h1 = fetch_df(ex, SYMBOL, TF_ENTRY, limit=400)
                 df_btc = fetch_df(ex, "BTC/USDT", TF_REGIME, limit=300)
@@ -529,7 +537,6 @@ def main():
     ex = make_exchange()
     state = load_state()
 
-    # Startup message (push alert) – only if TELEGRAM_CHAT_ID is set
     if TELEGRAM_CHAT_ID:
         tg_send(f"Bot started for {SYMBOL}\nCommands: /check")
 
@@ -539,10 +546,10 @@ def main():
 
     while True:
         try:
-            # 1) Handle Telegram commands quickly (non-blocking)
+            # Listen commands
             handle_telegram_commands(ex, state)
 
-            # 2) Fetch market data for alert logic
+            # Data for alerts
             df_h4 = fetch_df(ex, SYMBOL, TF_REGIME, limit=300)
             df_h1 = fetch_df(ex, SYMBOL, TF_ENTRY, limit=400)
             df_btc = fetch_df(ex, "BTC/USDT", TF_REGIME, limit=300)
@@ -550,7 +557,7 @@ def main():
             regime = compute_regime(df_h4, df_btc)
             stop_mode, stop_reason = compute_stop_sell_mode(df_h4)
 
-            # Mode change notifications (once per current H4 bar)
+            # Notify mode change once per H4 bar
             h4_ts = df_h4.index[-1].isoformat()
             if stop_mode != stop_mode_prev and last_mode_h4_ts != h4_ts and TELEGRAM_CHAT_ID:
                 if stop_mode:
@@ -565,11 +572,11 @@ def main():
 
             # Signals
             sell_ok, sell_reason = check_sell(df_h4, df_h1, regime, stop_mode)
-            buy_ok, buy_reason = check_buy(df_h1)
+            buy_ok, buy_reason = check_buy(df_h1, df_h4)
 
             h1_ts = df_h1.index[-1].isoformat()
 
-            # Dedup: only one signal per H1 candle
+            # One alert per H1 candle
             if h1_ts != last_signal_h1_ts and TELEGRAM_CHAT_ID:
                 price = float(df_h1["close"].iloc[-1])
 
