@@ -1,4 +1,7 @@
-ccxt==4.2.96
-pandas==2.2.2
-numpy==2.0.1
-python-dotenv==1.0.1
+fastapi
+uvicorn[standard]
+jinja2
+supabase
+python-multipart
+apscheduler
+requests
