@@ -6,6 +6,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <!-- Marked.js for AI markdown rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
 
   <style>
     :root {
@@ -229,6 +231,77 @@
     .d1-bear { background: rgba(239, 68, 68, 0.15); color: #dc2626; border: 1px solid rgba(239,68,68,0.3); }
     .d1-neutral { background: rgba(107, 114, 128, 0.12); color: #6b7280; border: 1px solid rgba(107,114,128,0.25); }
 
+    /* AI analysis panel */
+    .ai-panel {
+      background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+      border-color: rgba(99, 102, 241, 0.3);
+    }
+
+    .ai-panel .panel-title {
+      color: #e2e8f0;
+      border-bottom: 1px solid rgba(99, 102, 241, 0.2);
+      padding-bottom: 10px;
+      margin-bottom: 14px;
+    }
+
+    .ai-panel .panel-title .sub { color: #94a3b8; }
+
+    .ai-badge {
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      color: #fff;
+      font-size: 0.7rem;
+      font-weight: 700;
+      padding: 3px 9px;
+      border-radius: 999px;
+      letter-spacing: 0.08em;
+    }
+
+    .ai-body {
+      color: #cbd5e1;
+      font-size: 0.92rem;
+      line-height: 1.75;
+    }
+
+    .ai-body h3 {
+      color: #f1f5f9;
+      font-size: 0.97rem;
+      font-weight: 700;
+      margin: 16px 0 6px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .ai-body h3:first-child { margin-top: 0; }
+
+    .ai-body p  { margin: 0 0 10px; }
+    .ai-body ul { margin: 0 0 10px; padding-left: 20px; }
+    .ai-body li { margin-bottom: 4px; }
+
+    .ai-body strong { color: #f8fafc; font-weight: 600; }
+
+    .ai-body table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 12px;
+      font-size: 0.88rem;
+    }
+
+    .ai-body th {
+      background: rgba(99, 102, 241, 0.15);
+      color: #a5b4fc;
+      padding: 6px 10px;
+      text-align: left;
+      font-weight: 600;
+    }
+
+    .ai-body td {
+      padding: 5px 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+    }
+
+    .ai-body tr:last-child td { border-bottom: none; }
+
     @media (max-width: 640px) {
       .header { align-items: flex-start; }
     }
@@ -380,9 +453,28 @@
       </div>
       <canvas id="stochChart" height="100"></canvas>
     </section>
+
+    <!-- AI MARKET ANALYSIS -->
+    {% if ai_analysis %}
+    <section class="panel ai-panel">
+      <div class="panel-title">
+        <div>
+          🤖 Phân tích thị trường AI
+          <span class="sub">{{ symbol }} · {{ tf }} · OpenRouter</span>
+        </div>
+        <span class="ai-badge">AI</span>
+      </div>
+      <div class="ai-body" id="aiBody"></div>
+    </section>
+    {% endif %}
   </div>
 
   <!-- ================= SCRIPT ================= -->
+  <!-- AI analysis raw text (markdown) -->
+  {% if ai_analysis %}
+  <script id="ai-analysis-raw" type="text/plain">{{ ai_analysis | e }}</script>
+  {% endif %}
+
   <!-- Safe JSON data island — avoids JS string escaping issues -->
   <script id="rows-data" type="application/json">{{ rows_json_str | safe }}</script>
 
@@ -874,6 +966,14 @@
         }
       }
     });
+
+    // ==== AI Analysis: render markdown into panel ====
+    const aiRaw = document.getElementById('ai-analysis-raw');
+    const aiBody = document.getElementById('aiBody');
+    if (aiRaw && aiBody && typeof marked !== 'undefined') {
+      marked.setOptions({ breaks: true, gfm: true });
+      aiBody.innerHTML = marked.parse(aiRaw.textContent.trim());
+    }
   </script>
 </body>
 </html>
