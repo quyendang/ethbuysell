@@ -357,19 +357,17 @@ def check_buy(df_h4: pd.DataFrame, df_d1: pd.DataFrame) -> Tuple[bool, str]:
 
 
 def format_check_report(df_d1: pd.DataFrame, df_h4: pd.DataFrame, df_btc_d1: pd.DataFrame) -> str:
-
     regime = compute_regime(df_d1, df_btc_d1)
     stop_mode, _ = compute_stop_sell_mode(df_d1)
     zones = compute_zones(df_d1, df_h4)
 
     price = zones["price"]
-
     ema50_h4 = zones["ema50_h4"]
     ema200_h4 = zones["ema200_h4"]
 
     bz_lo, bz_hi = zones["buy_zone"]
 
-    # tìm sell zone chính
+    # lấy sell zone chính = EMA50_H4
     sell_lo, sell_hi = None, None
     for name, lo, hi in zones["sell_zones"]:
         if name == "EMA50_H4":
@@ -377,7 +375,7 @@ def format_check_report(df_d1: pd.DataFrame, df_h4: pd.DataFrame, df_btc_d1: pd.
             break
 
     if sell_lo is None:
-        name, sell_lo, sell_hi = zones["sell_zones"][0]
+        _, sell_lo, sell_hi = zones["sell_zones"][0]
 
     # vị trí hiện tại
     if price > ema50_h4:
@@ -395,20 +393,25 @@ def format_check_report(df_d1: pd.DataFrame, df_h4: pd.DataFrame, df_btc_d1: pd.
     else:
         trend = "Không rõ"
 
-    # tín hiệu
     sell_ok, _ = check_sell(df_d1, df_h4, regime, stop_mode)
     buy_ok, _ = check_buy(df_h4, df_d1)
 
-    action = "ĐỨNG CHỜ"
+    in_sell_zone = sell_lo <= price <= sell_hi
+    above_sell_zone = price > sell_hi
+    in_buy_zone = bz_lo <= price <= bz_hi
+    near_ema200 = price <= ema200_h4
 
-    if sell_ok:
-        action = "🔴 CÂN NHẮC BÁN"
+    action = "🟡 ĐỨNG CHỜ"
 
-    elif buy_ok:
-        action = "🟢 CÂN NHẮC MUA"
-
-    elif stop_mode:
+    # Ưu tiên chặn các case sai ngữ cảnh trước
+    if stop_mode:
         action = "⛔ TẠM KHÔNG BÁN"
+    elif sell_ok:
+        action = "🔴 CÂN NHẮC BÁN"
+    elif in_sell_zone or above_sell_zone:
+        action = "🟠 THEO DÕI VÙNG BÁN"
+    elif buy_ok and (in_buy_zone or near_ema200):
+        action = "🟢 CÂN NHẮC MUA"
 
     report = ""
     report += f"📊 {SYMBOL}: {price:.0f}\n\n"
