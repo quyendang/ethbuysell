@@ -450,15 +450,6 @@
       <canvas id="macdChart" height="120"></canvas>
     </section>
 
-    <!-- STOCHASTIC CHART -->
-    <section class="panel">
-      <div class="panel-title">
-        Stochastic %K
-        <span class="sub">{{ tf }} — period 14</span>
-      </div>
-      <canvas id="stochChart" height="100"></canvas>
-    </section>
-
     <!-- VOLUME CHART -->
     <section class="panel">
       <div class="panel-title">
@@ -935,6 +926,18 @@
             pointRadius: 0,
             borderWidth: 1,
             order: 9
+          },
+          {
+            label: "Stoch %K",
+            data: stochK,
+            borderColor: "rgba(139, 92, 246, 0.75)",
+            backgroundColor: "transparent",
+            yAxisID: "yStoch",
+            tension: 0.2,
+            pointRadius: 0,
+            borderWidth: 1.2,
+            borderDash: [3, 2],
+            order: 10
           }
         ]
       },
@@ -947,6 +950,11 @@
             mode: "index",
             intersect: false,
             callbacks: {
+              label: function(ctx) {
+                if (ctx.dataset.yAxisID === "yStoch")
+                  return "Stoch %K: " + (ctx.parsed.y != null ? ctx.parsed.y.toFixed(1) : "—");
+                return ctx.dataset.label + ": " + (ctx.parsed.y != null ? ctx.parsed.y.toLocaleString() : "—");
+              },
               afterBody: function(items) {
                 const i = items[0] ? items[0].dataIndex : null;
                 if (i === null) return [];
@@ -967,6 +975,18 @@
             position: "left",
             title: { display: true, text: "Price" },
             grid: { drawOnChartArea: true }
+          },
+          yStoch: {
+            type: "linear",
+            position: "right",
+            min: 0,
+            max: 100,
+            title: { display: true, text: "Stoch %K" },
+            grid: { drawOnChartArea: false },
+            ticks: {
+              stepSize: 20,
+              color: "rgba(139, 92, 246, 0.8)"
+            }
           },
           x: {
             ticks: { maxRotation: 60, minRotation: 45 }
@@ -1052,47 +1072,7 @@
       }
     });
 
-    // ==== 10. Stochastic Chart ====
-    const ctxStoch = document.getElementById("stochChart").getContext("2d");
-
-    new Chart(ctxStoch, {
-      type: "line",
-      data: {
-        labels: labels,
-        datasets: [
-          {
-            label: "Stoch %K",
-            data: stochK,
-            borderColor: "rgba(139, 92, 246, 1)",
-            backgroundColor: "rgba(139, 92, 246, 0.05)",
-            tension: 0.2,
-            pointRadius: 0,
-            borderWidth: 1.5
-          }
-        ]
-      },
-      options: {
-        responsive: true,
-        interaction: { mode: "index", intersect: false },
-        plugins: {
-          legend: { position: "top" },
-          tooltip: { mode: "index", intersect: false }
-        },
-        scales: {
-          y: {
-            min: 0,
-            max: 100,
-            title: { display: true, text: "Stoch %K" },
-            grid: { drawOnChartArea: true }
-          },
-          x: {
-            ticks: { maxRotation: 60, minRotation: 45 }
-          }
-        }
-      }
-    });
-
-    // ==== 11. Volume Chart ====
+    // ==== 10. Volume Chart ====
     const ctxVolume = document.getElementById("volumeChart").getContext("2d");
 
     const volumeColors = volumes.map((v, i) => {
