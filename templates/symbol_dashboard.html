@@ -454,6 +454,15 @@
       <canvas id="stochChart" height="100"></canvas>
     </section>
 
+    <!-- VOLUME CHART -->
+    <section class="panel">
+      <div class="panel-title">
+        Volume
+        <span class="sub">{{ tf }}</span>
+      </div>
+      <canvas id="volumeChart" height="100"></canvas>
+    </section>
+
     <!-- AI MARKET ANALYSIS -->
     {% if ai_analysis %}
     <section class="panel ai-panel">
@@ -489,9 +498,13 @@
     const rsiValues  = rows.map(r => r.rsi_h4);
     const macdHist   = rows.map(r => r.macd_hist);
 
-    const emaFast    = rows.map(r => r.ema_fast);
-    const emaSlow    = rows.map(r => r.ema_slow);
+    const ema34      = rows.map(r => r.ema34);
+    const ema50      = rows.map(r => r.ema50);
+    const ema89      = rows.map(r => r.ema89);
+    const ema200     = rows.map(r => r.ema200);
     const sma50      = rows.map(r => r.sma_50);
+    const sma150     = rows.map(r => r.sma_150);
+    const volumes    = rows.map(r => r.volume);
     const bbMiddle   = rows.map(r => r.bb_middle);
     const bbUpper    = rows.map(r => r.bb_upper);
     const bbLower    = rows.map(r => r.bb_lower);
@@ -744,38 +757,60 @@
             order: 1
           },
           {
-            label: "EMA 12",
-            data: emaFast,
-            borderColor: "rgba(16, 185, 129, 0.8)",
+            label: "EMA 34",
+            data: ema34,
+            borderColor: "rgba(16, 185, 129, 0.9)",
             backgroundColor: "transparent",
             yAxisID: "y",
             tension: 0.2,
             pointRadius: 0,
-            borderWidth: 1.2,
+            borderWidth: 1.4,
             order: 2
           },
           {
-            label: "EMA 26",
-            data: emaSlow,
-            borderColor: "rgba(245, 158, 11, 0.8)",
+            label: "EMA 50",
+            data: ema50,
+            borderColor: "rgba(245, 158, 11, 0.9)",
             backgroundColor: "transparent",
             yAxisID: "y",
             tension: 0.2,
             pointRadius: 0,
-            borderWidth: 1.2,
+            borderWidth: 1.4,
             order: 3
           },
           {
-            label: "SMA 50",
-            data: sma50,
-            borderColor: "rgba(239, 68, 68, 0.7)",
+            label: "EMA 89",
+            data: ema89,
+            borderColor: "rgba(239, 68, 68, 0.85)",
+            backgroundColor: "transparent",
+            yAxisID: "y",
+            tension: 0.2,
+            pointRadius: 0,
+            borderWidth: 1.6,
+            order: 4
+          },
+          {
+            label: "EMA 200",
+            data: ema200,
+            borderColor: "rgba(139, 92, 246, 0.85)",
+            backgroundColor: "transparent",
+            yAxisID: "y",
+            tension: 0.2,
+            pointRadius: 0,
+            borderWidth: 2,
+            order: 5
+          },
+          {
+            label: "SMA 150",
+            data: sma150,
+            borderColor: "rgba(249, 115, 22, 0.7)",
             backgroundColor: "transparent",
             yAxisID: "y",
             tension: 0,
             pointRadius: 0,
             borderWidth: 1.5,
-            borderDash: [6, 3],
-            order: 4
+            borderDash: [8, 4],
+            order: 6
           },
           {
             label: "BB Middle",
@@ -787,7 +822,7 @@
             pointRadius: 0,
             borderWidth: 1,
             borderDash: [2, 4],
-            order: 5
+            order: 7
           },
           {
             label: "BB Upper",
@@ -798,7 +833,7 @@
             tension: 0.2,
             pointRadius: 0,
             borderWidth: 1,
-            order: 6
+            order: 8
           },
           {
             label: "BB Lower",
@@ -809,7 +844,7 @@
             tension: 0.2,
             pointRadius: 0,
             borderWidth: 1,
-            order: 7
+            order: 9
           }
         ]
       },
@@ -959,6 +994,67 @@
             max: 100,
             title: { display: true, text: "Stoch %K" },
             grid: { drawOnChartArea: true }
+          },
+          x: {
+            ticks: { maxRotation: 60, minRotation: 45 }
+          }
+        }
+      }
+    });
+
+    // ==== 11. Volume Chart ====
+    const ctxVolume = document.getElementById("volumeChart").getContext("2d");
+
+    const volumeColors = volumes.map((v, i) => {
+      const prev = i > 0 ? prices[i - 1] : prices[i];
+      return prices[i] >= prev
+        ? "rgba(34, 197, 94, 0.6)"
+        : "rgba(239, 68, 68, 0.6)";
+    });
+
+    new Chart(ctxVolume, {
+      type: "bar",
+      data: {
+        labels: labels,
+        datasets: [
+          {
+            label: "Volume",
+            data: volumes,
+            backgroundColor: volumeColors,
+            borderWidth: 0,
+            barPercentage: 0.9,
+            categoryPercentage: 0.9
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: { position: "top" },
+          tooltip: {
+            mode: "index",
+            intersect: false,
+            callbacks: {
+              label: function(ctx) {
+                const v = ctx.parsed.y;
+                if (v >= 1e6) return "Volume: " + (v / 1e6).toFixed(2) + "M";
+                if (v >= 1e3) return "Volume: " + (v / 1e3).toFixed(1) + "K";
+                return "Volume: " + v.toFixed(2);
+              }
+            }
+          }
+        },
+        scales: {
+          y: {
+            title: { display: true, text: "Volume" },
+            ticks: {
+              callback: function(v) {
+                if (v >= 1e6) return (v / 1e6).toFixed(1) + "M";
+                if (v >= 1e3) return (v / 1e3).toFixed(0) + "K";
+                return v;
+              }
+            }
           },
           x: {
             ticks: { maxRotation: 60, minRotation: 45 }

@@ -482,41 +482,54 @@ def _williams_r(
 # 3b) D1 BIAS + CANDLE SIGNALS
 # ------------------------------------------------------------------
 def compute_d1_bias(symbol: str) -> tuple[bool, bool]:
-    """Fetch D1 klines and return (d1_bullish, d1_bearish)."""
-    klines_d1 = _rsi_fetch_klines(symbol, "1d", limit=200)
+    """
+    Fetch D1 klines and return (d1_bullish, d1_bearish).
+    Uses EMA34/89 for trend direction and EMA200 as macro filter.
+    """
+    klines_d1 = _rsi_fetch_klines(symbol, "1d", limit=250)
     closes_d1 = [float(k[4]) for k in klines_d1]
-    ema12_d1 = _compute_ema_series(closes_d1, 12)
-    ema26_d1 = _compute_ema_series(closes_d1, 26)
-    sma50_d1 = _sma_series(closes_d1, 50)
+    ema34_d1  = _compute_ema_series(closes_d1, 34)
+    ema89_d1  = _compute_ema_series(closes_d1, 89)
+    ema200_d1 = _compute_ema_series(closes_d1, 200)
     _, _, hist_d1 = _compute_macd_series(closes_d1, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
-    e12 = ema12_d1[-1]
-    e26 = ema26_d1[-1]
-    s50 = sma50_d1[-1]
-    h   = hist_d1[-1]
-    p   = closes_d1[-1]
-    d1_bullish = (e12 is not None and e26 is not None and e12 > e26
-                  and s50 is not None and p > s50 and h > -0.5)
-    d1_bearish = (e12 is not None and e26 is not None and e12 < e26
-                  and s50 is not None and p < s50 and h < 0.5)
+    e34  = ema34_d1[-1]
+    e89  = ema89_d1[-1]
+    e200 = ema200_d1[-1]
+    h    = hist_d1[-1]
+    p    = closes_d1[-1]
+    # Bullish: short EMA above medium EMA, price above macro EMA200, MACD not deeply negative
+    d1_bullish = (
+        e34 is not None and e89 is not None and e34 > e89
+        and (e200 is None or p > e200)
+        and h is not None and h > -0.5
+    )
+    # Bearish: short EMA below medium EMA, price below EMA200, MACD not positive
+    d1_bearish = (
+        e34 is not None and e89 is not None and e34 < e89
+        and (e200 is None or p < e200)
+        and h is not None and h < 0.5
+    )
     return d1_bullish, d1_bearish
 
 
 def compute_candle_signals(
-    closes, highs, lows, rsi, macd_hist, ema_fast, ema_slow,
-    sma_50, bb_upper, bb_lower, stoch_k, williams_r,
+    closes, highs, lows, rsi, macd_hist,
+    ema34, ema50, ema89, ema200,
+    sma_50, sma_150, bb_upper, bb_lower, stoch_k, williams_r,
     buy_zone_low, buy_zone_high, sell_zone_low, sell_zone_high,
     d1_bullish, d1_bearish, btc_rsi_h4, btc_macd_hist
 ) -> list[dict]:
     """
-    Weighted scoring signal engine. Replaces the brittle 3-gate AND system.
+    Weighted scoring signal engine.
 
-    BUY score (max ~13):
-      +3  price inside buy zone          (base, required — no zone = no signal)
+    BUY score (max ~14):
+      +3  price inside buy zone          (base, required)
       +1  RSI < 45
       +1  RSI < 35 (extra)
       +1  MACD hist improving (hist > prev)
       +1  MACD hist > 0
-      +1  EMA12 > EMA26 (trend aligned)
+      +1  EMA34 > EMA89 (trend aligned bullish)
+      +1  price above SMA150 (macro support)
       +1  Stoch %K < 30
       +1  Williams %R < -70
       +2  D1 macro bullish
@@ -534,8 +547,9 @@ def compute_candle_signals(
         rsi_i  = rsi[i]       if i < len(rsi)       else None
         macd_i = macd_hist[i] if i < len(macd_hist) else None
         macd_p = macd_hist[i - 1] if i > 0 and (i - 1) < len(macd_hist) else None
-        ef     = ema_fast[i]  if i < len(ema_fast)  else None
-        es     = ema_slow[i]  if i < len(ema_slow)  else None
+        e34_i  = ema34[i]    if i < len(ema34)    else None
+        e89_i  = ema89[i]    if i < len(ema89)    else None
+        s150_i = sma_150[i]  if i < len(sma_150)  else None
         bb_u   = bb_upper[i]  if i < len(bb_upper)  else None
         bb_l   = bb_lower[i]  if i < len(bb_lower)  else None
         sk     = stoch_k[i]   if i < len(stoch_k)   else None
@@ -555,8 +569,9 @@ def compute_candle_signals(
             if macd_i is not None and macd_p is not None:
                 if macd_i > macd_p: buy_score += 1   # momentum improving
                 if macd_i > 0:      buy_score += 1   # positive territory
-            if ef is not None and es is not None and ef > es:
-                buy_score += 1                         # EMA trend aligned
+            if e34_i is not None and e89_i is not None and e34_i > e89_i:
+                buy_score += 1                         # EMA34 > EMA89 trend aligned
+            if s150_i is not None and price > s150_i: buy_score += 1  # above SMA150
             if sk  is not None and sk  < 30:  buy_score += 1
             if wr_i is not None and wr_i < -70: buy_score += 1
             if d1_bullish:                    buy_score += 2
@@ -576,8 +591,8 @@ def compute_candle_signals(
             if macd_i is not None and macd_p is not None:
                 if macd_i < macd_p: sell_score += 1   # momentum fading
                 if macd_i < 0:      sell_score += 1   # negative territory
-            if ef is not None and es is not None and ef < es:
-                sell_score += 1                         # EMA trend aligned
+            if e34_i is not None and e89_i is not None and e34_i < e89_i:
+                sell_score += 1                         # EMA34 < EMA89 trend aligned
             if sk   is not None and sk   > 70:  sell_score += 1
             if wr_i is not None and wr_i > -30: sell_score += 1
             if d1_bearish:                      sell_score += 2
@@ -678,7 +693,7 @@ Dưới đây là dữ liệu thị trường thực tế của {symbol} trên k
 | Thay đổi ~24h | {_fmt(snap.get('change_24h'), 2)}% |
 | RSI (14) | {_fmt(snap.get('rsi'))} |
 | MACD Histogram | {_fmt(snap.get('macd_hist'), 6)} ({'⬆ tăng' if snap.get('macd_hist_rising') else '⬇ giảm'}) |
-| EMA 12 vs EMA 26 | {'📈 EMA12 > EMA26 (tăng)' if snap.get('ema_bullish') else '📉 EMA12 < EMA26 (giảm)' if snap.get('ema_bearish') else '➡ Đan xen'} |
+| EMA 34 vs EMA 89 | {'📈 EMA34 > EMA89 (tăng)' if snap.get('ema_bullish') else '📉 EMA34 < EMA89 (giảm)' if snap.get('ema_bearish') else '➡ Đan xen'} |
 | Stochastic %K | {_fmt(snap.get('stoch_k'))} |
 | Williams %R | {_fmt(snap.get('wr'))} |
 | BB Upper / Lower | {_fmt(snap.get('bb_upper'), 4)} / {_fmt(snap.get('bb_lower'), 4)} |
@@ -1089,6 +1104,7 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
     closes: List[float] = []
     highs: List[float] = []
     lows: List[float] = []
+    volumes: List[float] = []
 
     for k in klines:
         try:
@@ -1099,6 +1115,7 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
             highs.append(float(k[2]))
             lows.append(float(k[3]))
             closes.append(float(k[4]))
+            volumes.append(float(k[5]))
         except Exception as e:
             logging.warning(f"[SYMBOL DASH] Bad kline row for {symbol}: {e}")
             continue
@@ -1128,9 +1145,12 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
     macd_line_series, macd_signal_series, macd_hist_values = _compute_macd_series(
         closes, MACD_FAST, MACD_SLOW, MACD_SIGNAL
     )
-    ema_fast = _compute_ema_series(closes, 12)
-    ema_slow = _compute_ema_series(closes, 26)
+    ema34 = _compute_ema_series(closes, 34)
+    ema50 = _compute_ema_series(closes, 50)
+    ema89 = _compute_ema_series(closes, 89)
+    ema200 = _compute_ema_series(closes, 200)
     sma_50 = _sma_series(closes, 50)
+    sma_150 = _sma_series(closes, 150)
 
     bb_middle, bb_upper, bb_lower = _bollinger_bands(closes, period=20, k=2.0)
     stoch_k = _stochastic_oscillator(highs, lows, closes, period=14)
@@ -1147,10 +1167,15 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
     min_len = min(
         n,
         len(labels),
+        len(volumes),
         len(rsi_values),
         len(macd_hist_values),
-        len(ema_fast),
-        len(ema_slow),
+        len(ema34),
+        len(ema50),
+        len(ema89),
+        len(ema200),
+        len(sma_50),
+        len(sma_150),
         len(bb_upper),
         len(bb_lower),
         len(stoch_k),
@@ -1161,11 +1186,15 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
     closes_trimmed = closes[-min_len:]
     highs_trimmed = highs[-min_len:]
     lows_trimmed = lows[-min_len:]
+    volumes_trimmed = volumes[-min_len:]
     rsi_values = rsi_values[-min_len:]
     macd_hist_values = macd_hist_values[-min_len:]
-    ema_fast = ema_fast[-min_len:]
-    ema_slow = ema_slow[-min_len:]
+    ema34 = ema34[-min_len:]
+    ema50 = ema50[-min_len:]
+    ema89 = ema89[-min_len:]
+    ema200 = ema200[-min_len:]
     sma_50 = sma_50[-min_len:]
+    sma_150 = sma_150[-min_len:]
     bb_middle = bb_middle[-min_len:]
     bb_upper = bb_upper[-min_len:]
     bb_lower = bb_lower[-min_len:]
@@ -1180,11 +1209,15 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
                 "price": closes_trimmed[i],
                 "high": highs_trimmed[i],
                 "low": lows_trimmed[i],
+                "volume": volumes_trimmed[i],
                 "rsi_h4": rsi_values[i],
                 "macd_hist": macd_hist_values[i],
-                "ema_fast": ema_fast[i],
-                "ema_slow": ema_slow[i],
+                "ema34": ema34[i],
+                "ema50": ema50[i],
+                "ema89": ema89[i],
+                "ema200": ema200[i],
                 "sma_50": sma_50[i],
+                "sma_150": sma_150[i],
                 "bb_middle": bb_middle[i],
                 "bb_upper": bb_upper[i],
                 "bb_lower": bb_lower[i],
@@ -1217,9 +1250,12 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
         lows=lows_trimmed,
         rsi=rsi_values,
         macd_hist=macd_hist_values,
-        ema_fast=ema_fast,
-        ema_slow=ema_slow,
+        ema34=ema34,
+        ema50=ema50,
+        ema89=ema89,
+        ema200=ema200,
         sma_50=sma_50,
+        sma_150=sma_150,
         bb_upper=bb_upper,
         bb_lower=bb_lower,
         stoch_k=stoch_k,
@@ -1290,8 +1326,8 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
             and macd_hist_values[-2] is not None
             and macd_hist_values[-1] > macd_hist_values[-2]
         ),
-        "ema_bullish":     (ema_fast[-1] is not None and ema_slow[-1] is not None and ema_fast[-1] > ema_slow[-1]),
-        "ema_bearish":     (ema_fast[-1] is not None and ema_slow[-1] is not None and ema_fast[-1] < ema_slow[-1]),
+        "ema_bullish":     (ema34[-1] is not None and ema89[-1] is not None and ema34[-1] > ema89[-1]),
+        "ema_bearish":     (ema34[-1] is not None and ema89[-1] is not None and ema34[-1] < ema89[-1]),
         "stoch_k":         stoch_k[-1] if stoch_k else None,
         "wr":              williams_r_vals[-1] if williams_r_vals else None,
         "bb_upper":        bb_upper[-1] if bb_upper else None,
@@ -1310,7 +1346,7 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
         "sell_score":      last_signal.get("sell_score", 0),
     }
     ai_analysis = call_openrouter_analysis(symbol, tf, ai_snap)
-    logging.warning(ai_analysis)
+
     context = {
         "request": request,
         "symbol": symbol,
