@@ -172,8 +172,10 @@
       border-radius: 999px;
     }
 
-    .legend-buy  { background: rgba(34, 197, 94, 0.12); }
-    .legend-sell { background: rgba(239, 68, 68, 0.12); }
+    .legend-buy     { background: rgba(34, 197, 94, 0.12); }
+    .legend-sell    { background: rgba(239, 68, 68, 0.12); }
+    .legend-db-buy  { background: rgba(5, 150, 105, 0.85); border-radius: 2px; }
+    .legend-db-sell { background: rgba(220, 38, 38, 0.85); border-radius: 2px; }
 
     .sub-btn {
       border: none;
@@ -422,6 +424,8 @@
         <div class="zone-legend">
           <span class="legend-box legend-buy"></span> Buy zone
           <span class="legend-box legend-sell"></span> Sell zone
+          <span class="legend-box legend-db-buy"></span> Bot BUY
+          <span class="legend-box legend-db-sell"></span> Bot SELL
         </div>
       </div>
       <canvas id="priceChart" height="260"></canvas>
@@ -486,10 +490,12 @@
 
   <!-- Safe JSON data island — avoids JS string escaping issues -->
   <script id="rows-data" type="application/json">{{ rows_json_str | safe }}</script>
+  <script id="db-signals-data" type="application/json">{{ db_signals_json | safe }}</script>
 
   <script>
     // ==== 1. Data from backend ====
     const rows = JSON.parse(document.getElementById('rows-data').textContent);
+    const dbSignals = JSON.parse(document.getElementById('db-signals-data').textContent);
     const symbol = "{{ symbol }}";
     const tf = "{{ tf }}";
 
@@ -722,7 +728,90 @@
       }
     };
 
-    Chart.register(priceZonesPlugin, signalArrowPlugin, rsiLinesPlugin);
+    // ==== 5b. Plugin: DB historical signals (diamond markers from scheduler) ====
+    // Match each DB signal to the nearest chart candle by timestamp distance.
+    const dbSignalsByIndex = {};  // index → [{type, price, strength, detail}]
+
+    if (dbSignals && dbSignals.length > 0 && labels.length > 0) {
+      // Parse chart label timestamps once
+      const labelMs = labels.map(l => new Date(l.replace(" ", "T") + "Z").getTime());
+
+      dbSignals.forEach(sig => {
+        const sigMs = new Date(sig.created_at).getTime();
+        if (isNaN(sigMs)) return;
+        // Find the candle index with the smallest time distance
+        let bestIdx = 0, bestDist = Infinity;
+        for (let i = 0; i < labelMs.length; i++) {
+          const dist = Math.abs(labelMs[i] - sigMs);
+          if (dist < bestDist) { bestDist = dist; bestIdx = i; }
+        }
+        if (!dbSignalsByIndex[bestIdx]) dbSignalsByIndex[bestIdx] = [];
+        dbSignalsByIndex[bestIdx].push(sig);
+      });
+    }
+
+    const dbSignalPlugin = {
+      id: 'dbSignals',
+      afterDraw(chart) {
+        if (chart.canvas.id !== "priceChart") return;
+        const { ctx, scales } = chart;
+        if (!scales || !scales.y) return;
+        const meta0 = chart.getDatasetMeta(0);
+        if (!meta0 || !meta0.data) return;
+
+        ctx.save();
+
+        Object.entries(dbSignalsByIndex).forEach(([idxStr, sigs]) => {
+          const i = parseInt(idxStr, 10);
+          if (i >= meta0.data.length) return;
+          const pt = meta0.data[i];
+          const xPos = pt.x;
+
+          sigs.forEach(sig => {
+            const isBuy = sig.signal_type === "BUY";
+            const str   = sig.signal_strength || 1;
+            const size  = 10 + str * 2;   // 12–16px diamonds
+
+            // Position: buy below candle low, sell above candle high
+            // Use the matched candle's price from rows if available
+            const row = rows[i];
+            const refPrice = isBuy
+              ? (row ? row.low  : sig.price)
+              : (row ? row.high : sig.price);
+            const offset = isBuy ? size * 2.2 : -size * 2.2;
+            const yCenter = scales.y.getPixelForValue(refPrice) + offset;
+
+            // Draw diamond
+            const half = size / 2;
+            ctx.beginPath();
+            ctx.moveTo(xPos,          yCenter - half); // top
+            ctx.lineTo(xPos + half,   yCenter);         // right
+            ctx.lineTo(xPos,          yCenter + half); // bottom
+            ctx.lineTo(xPos - half,   yCenter);         // left
+            ctx.closePath();
+
+            ctx.fillStyle   = isBuy
+              ? "rgba(5, 150, 105, 0.92)"    // deep green
+              : "rgba(220, 38, 38, 0.92)";   // deep red
+            ctx.strokeStyle = "#ffffff";
+            ctx.lineWidth   = 1.5;
+            ctx.fill();
+            ctx.stroke();
+
+            // Label "B" / "S" inside
+            ctx.font         = `bold ${Math.round(size * 0.6)}px system-ui`;
+            ctx.fillStyle    = "#ffffff";
+            ctx.textAlign    = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(isBuy ? "B" : "S", xPos, yCenter);
+          });
+        });
+
+        ctx.restore();
+      }
+    };
+
+    Chart.register(priceZonesPlugin, signalArrowPlugin, rsiLinesPlugin, dbSignalPlugin);
 
     // ==== 6. MACD histogram 4-state coloring ====
     const macdHistColors = macdHist.map((v, i) => {

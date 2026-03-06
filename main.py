@@ -971,11 +971,66 @@ def run_symbol_tracker_once(symbol: str, send_notify: bool = False) -> Dict[str,
     return payload
 
 
+def save_signal_to_db(
+    symbol: str,
+    timeframe: str,
+    signal_type: str,
+    price: float,
+    rsi: Optional[float] = None,
+    macd_hist: Optional[float] = None,
+    buy_score: int = 0,
+    sell_score: int = 0,
+    signal_strength: int = 1,
+    signal_detail: str = "",
+) -> None:
+    """
+    Persist a BUY or SELL signal to the signal_history table.
+    Duplicate-guard: skip if the same symbol+timeframe+signal_type was saved
+    in the last 30 minutes (prevents duplicate alerts from reruns).
+    """
+    try:
+        from datetime import timezone, timedelta
+        cutoff_dt = datetime.now(tz=timezone.utc) - timedelta(minutes=30)
+        cutoff = cutoff_dt.isoformat()
+
+        # Duplicate-guard: skip if same signal fired within last 30 minutes
+        check = (
+            supabase_admin.table("signal_history")
+            .select("id")
+            .eq("symbol", symbol)
+            .eq("timeframe", timeframe)
+            .eq("signal_type", signal_type)
+            .gte("created_at", cutoff)
+            .limit(1)
+            .execute()
+        )
+        if check.data:
+            logging.info(f"[SIGNAL_DB] Skip duplicate {signal_type} {symbol} (within 30m)")
+            return
+
+        supabase_admin.table("signal_history").insert({
+            "symbol":          symbol,
+            "timeframe":       timeframe,
+            "signal_type":     signal_type,
+            "price":           price,
+            "rsi":             rsi,
+            "macd_hist":       macd_hist,
+            "buy_score":       buy_score,
+            "sell_score":      sell_score,
+            "signal_strength": signal_strength,
+            "signal_detail":   signal_detail,
+        }).execute()
+        logging.info(f"[SIGNAL_DB] Saved {signal_type} {symbol} @ {price}")
+    except Exception as e:
+        logging.error(f"[SIGNAL_DB] Error saving signal: {e}")
+
+
 def symbols_tracker_job():
     """
     Job chạy mỗi 10 phút:
     - Lấy danh sách symbol is_active = true trong bot_subscriptions
     - Mỗi symbol → run_symbol_tracker_once(send_notify=True)
+    - BUY/SELL signals are persisted to signal_history table
     """
     try:
         resp = (
@@ -995,9 +1050,20 @@ def symbols_tracker_job():
             continue
         try:
             payload = run_symbol_tracker_once(symbol, send_notify=True)
+            action = payload["action"]
             logging.info(
-                f"[SYMBOL_TRACKER_JOB] {symbol}: action={payload['action']} price={payload['price']}"
+                f"[SYMBOL_TRACKER_JOB] {symbol}: action={action} price={payload['price']}"
             )
+            if action in ("BUY", "SELL"):
+                save_signal_to_db(
+                    symbol=symbol,
+                    timeframe=payload.get("timeframe", TRACKER_INTERVAL),
+                    signal_type=action,
+                    price=payload["price"],
+                    rsi=payload.get("rsi_h4"),
+                    macd_hist=payload.get("macd_hist"),
+                    signal_detail=payload.get("reason", ""),
+                )
         except Exception as e:
             logging.error(f"[SYMBOL_TRACKER_JOB] {symbol}: error {e}")
 
@@ -1313,6 +1379,23 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
 
     rows_json_str = json.dumps(rows_json)
 
+    # --- Historical DB signals ---
+    db_signals: List[Dict[str, Any]] = []
+    try:
+        sig_resp = (
+            supabase_admin.table("signal_history")
+            .select("signal_type, price, rsi, macd_hist, buy_score, sell_score, signal_strength, signal_detail, created_at")
+            .eq("symbol", symbol)
+            .order("created_at", desc=False)
+            .limit(500)
+            .execute()
+        )
+        db_signals = sig_resp.data or []
+    except Exception as e:
+        logging.error(f"[SYMBOL DASH] Error fetching signal_history: {e}")
+
+    db_signals_json = json.dumps(db_signals)
+
     # --- OpenRouter AI market analysis ---
     last_signal = signals[-1] if signals else {}
     ai_snap = {
@@ -1365,6 +1448,7 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
         "d1_bullish": d1_bullish,
         "d1_bearish": d1_bearish,
         "ai_analysis": ai_analysis,
+        "db_signals_json": db_signals_json,
     }
 
     return templates.TemplateResponse("symbol_dashboard.html", context)
