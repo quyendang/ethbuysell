@@ -1155,7 +1155,7 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
     symbol = symbol.upper()
 
     # Validate and map tf
-    valid_tfs = {"1h": "1h", "4h": "4h", "1d": "1d"}
+    valid_tfs = {"15m": "15m", "1h": "1h", "4h": "4h", "1d": "1d"}
     if tf not in valid_tfs:
         tf = "4h"
     interval = valid_tfs[tf]

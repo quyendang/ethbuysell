@@ -352,6 +352,7 @@
 
     <!-- TIMEFRAME SELECTOR + D1 BIAS -->
     <div class="tf-bar">
+      <a href="?tf=15m" class="tf-btn {% if tf == '15m' %}active{% endif %}">M15</a>
       <a href="?tf=1h" class="tf-btn {% if tf == '1h' %}active{% endif %}">H1</a>
       <a href="?tf=4h" class="tf-btn {% if tf == '4h' %}active{% endif %}">H4</a>
       <a href="?tf=1d" class="tf-btn {% if tf == '1d' %}active{% endif %}">D1</a>
@@ -522,8 +523,8 @@
     const sellHigh= {{ sell_high if sell_high is not none else 'null' }};
 
     // RSI thresholds based on timeframe
-    const rsiOversold   = tf === "1h" ? 35 : 30;
-    const rsiOverbought = tf === "1h" ? 65 : 70;
+    const rsiOversold   = (tf === "15m" || tf === "1h") ? 35 : 30;
+    const rsiOverbought = (tf === "15m" || tf === "1h") ? 65 : 70;
 
     // ==== 2. Update last state badge from server signals ====
     let lastState = "HOLD";
