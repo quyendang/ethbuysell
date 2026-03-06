@@ -1310,7 +1310,7 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
         "sell_score":      last_signal.get("sell_score", 0),
     }
     ai_analysis = call_openrouter_analysis(symbol, tf, ai_snap)
-
+    logging.warning(ai_analysis)
     context = {
         "request": request,
         "symbol": symbol,
