@@ -93,6 +93,10 @@ MACD_FAST = int(os.getenv("ETH_MACD_FAST", "12"))
 MACD_SLOW = int(os.getenv("ETH_MACD_SLOW", "26"))
 MACD_SIGNAL = int(os.getenv("ETH_MACD_SIGNAL", "9"))
 
+# OpenRouter AI
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL   = os.getenv("OPENROUTER_MODEL", "google/gemini-flash-1.5")
+
 # State
 _rsi_last_state: Dict[str, Dict[str, str]] = {sym: {tf: "unknown" for tf in RSI_TIMEFRAMES} for sym in RSI_SYMBOLS}
 _rsi_last_values: Dict[str, Dict[str, Dict[str, float]]] = {}
@@ -644,6 +648,104 @@ def compute_candle_signals(
 
 
 # ------------------------------------------------------------------
+# 3c) OPENROUTER AI ANALYSIS
+# ------------------------------------------------------------------
+def call_openrouter_analysis(symbol: str, tf: str, snap: dict) -> str:
+    """
+    Build a market snapshot prompt and call OpenRouter API.
+    Returns a Vietnamese markdown-formatted analysis string,
+    or "" if the API key is not set or the call fails.
+    """
+    if not OPENROUTER_API_KEY:
+        return ""
+
+    def _fmt(v, decimals=2):
+        return f"{v:.{decimals}f}" if v is not None else "N/A"
+
+    zone_label = {"buy": "Vùng MUA", "sell": "Vùng BÁN", "neutral": "Vùng trung lập"}.get(
+        snap.get("zone", "neutral"), "Trung lập"
+    )
+
+    prompt = f"""Bạn là chuyên gia phân tích kỹ thuật cryptocurrency chuyên nghiệp.
+Dưới đây là dữ liệu thị trường thực tế của {symbol} trên khung {tf}. Hãy phân tích và đưa ra nhận định bằng **tiếng Việt**.
+
+---
+## Snapshot thị trường — {symbol} ({tf})
+
+| Chỉ báo | Giá trị |
+|---------|---------|
+| Giá hiện tại | {_fmt(snap.get('price'), 4)} USDT |
+| Thay đổi ~24h | {_fmt(snap.get('change_24h'), 2)}% |
+| RSI (14) | {_fmt(snap.get('rsi'))} |
+| MACD Histogram | {_fmt(snap.get('macd_hist'), 6)} ({'⬆ tăng' if snap.get('macd_hist_rising') else '⬇ giảm'}) |
+| EMA 12 vs EMA 26 | {'📈 EMA12 > EMA26 (tăng)' if snap.get('ema_bullish') else '📉 EMA12 < EMA26 (giảm)' if snap.get('ema_bearish') else '➡ Đan xen'} |
+| Stochastic %K | {_fmt(snap.get('stoch_k'))} |
+| Williams %R | {_fmt(snap.get('wr'))} |
+| BB Upper / Lower | {_fmt(snap.get('bb_upper'), 4)} / {_fmt(snap.get('bb_lower'), 4)} |
+| Vị trí giá | **{zone_label}** |
+
+## Xu hướng D1 (Daily bias)
+- D1 Bullish: {'✅' if snap.get('d1_bullish') else '❌'}
+- D1 Bearish: {'✅' if snap.get('d1_bearish') else '❌'}
+
+## BTC Context ({tf})
+- BTC RSI: {_fmt(snap.get('btc_rsi'))}
+- BTC MACD Hist: {_fmt(snap.get('btc_macd_hist'), 6)}
+
+## Vùng giao dịch động
+- 🟢 Vùng MUA: {_fmt(snap.get('buy_low'), 2)} – {_fmt(snap.get('buy_high'), 2)}
+- 🔴 Vùng BÁN: {_fmt(snap.get('sell_low'), 2)} – {_fmt(snap.get('sell_high'), 2)}
+
+## Tín hiệu bot (4H)
+- Hành động: **{snap.get('tracker_action', 'N/A')}**
+- Buy score: {snap.get('buy_score', 0)} / 13
+- Sell score: {snap.get('sell_score', 0)} / 13
+
+---
+Viết phân tích thị trường theo đúng cấu trúc sau, bằng tiếng Việt, súc tích và chuyên nghiệp:
+
+### 1. 📊 Xu hướng tổng quan
+Mô tả xu hướng ngắn và trung hạn dựa trên EMA, D1 bias và vị trí giá trong vùng.
+
+### 2. 🔍 Phân tích chỉ báo kỹ thuật
+Nhận xét từng chỉ báo: RSI, MACD, Stochastic, Williams %R, Bollinger Bands — điểm mạnh/yếu của từng cái.
+
+### 3. 📍 Vùng giá quan trọng
+Phân tích vùng mua/bán động, mức hỗ trợ/kháng cự cần theo dõi.
+
+### 4. 💡 Khuyến nghị giao dịch
+Đưa ra khuyến nghị rõ ràng: BUY / HOLD / SELL, điều kiện vào lệnh, mức chốt lời/cắt lỗ tham khảo.
+
+### 5. ⚠️ Rủi ro cần lưu ý
+Các yếu tố có thể làm vô hiệu phân tích trên.
+
+Không nhắc lại bảng số liệu. Dùng emoji phù hợp. Tối đa 400 từ."""
+
+    try:
+        resp = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://qapi.app",
+                "X-Title": "QAPI Crypto Dashboard",
+            },
+            json={
+                "model": OPENROUTER_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 1500,
+                "temperature": 0.3,
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logging.error(f"[OPENROUTER] Error calling {OPENROUTER_MODEL}: {e}")
+        return ""
+
+
+# ------------------------------------------------------------------
 # 4) RSI BOT LOGIC
 # ------------------------------------------------------------------
 def _rsi_check_once():
@@ -1175,6 +1277,40 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
 
     rows_json_str = json.dumps(rows_json)
 
+    # --- OpenRouter AI market analysis ---
+    last_signal = signals[-1] if signals else {}
+    ai_snap = {
+        "price":           last_price,
+        "change_24h":      change_24h,
+        "rsi":             last_rsi,
+        "macd_hist":       macd_hist_values[-1] if macd_hist_values else None,
+        "macd_hist_rising": (
+            len(macd_hist_values) >= 2
+            and macd_hist_values[-1] is not None
+            and macd_hist_values[-2] is not None
+            and macd_hist_values[-1] > macd_hist_values[-2]
+        ),
+        "ema_bullish":     (ema_fast[-1] is not None and ema_slow[-1] is not None and ema_fast[-1] > ema_slow[-1]),
+        "ema_bearish":     (ema_fast[-1] is not None and ema_slow[-1] is not None and ema_fast[-1] < ema_slow[-1]),
+        "stoch_k":         stoch_k[-1] if stoch_k else None,
+        "wr":              williams_r_vals[-1] if williams_r_vals else None,
+        "bb_upper":        bb_upper[-1] if bb_upper else None,
+        "bb_lower":        bb_lower[-1] if bb_lower else None,
+        "d1_bullish":      d1_bullish,
+        "d1_bearish":      d1_bearish,
+        "btc_rsi":         btc_rsi_h4,
+        "btc_macd_hist":   btc_macd_hist_val,
+        "buy_low":         buy_low,
+        "buy_high":        buy_high,
+        "sell_low":        sell_low,
+        "sell_high":       sell_high,
+        "zone":            last_signal.get("zone", "neutral"),
+        "tracker_action":  tracker_action,
+        "buy_score":       last_signal.get("buy_score", 0),
+        "sell_score":      last_signal.get("sell_score", 0),
+    }
+    ai_analysis = call_openrouter_analysis(symbol, tf, ai_snap)
+
     context = {
         "request": request,
         "symbol": symbol,
@@ -1192,6 +1328,7 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
         "tracker_reason": tracker_reason,
         "d1_bullish": d1_bullish,
         "d1_bearish": d1_bearish,
+        "ai_analysis": ai_analysis,
     }
 
     return templates.TemplateResponse("symbol_dashboard.html", context)
@@ -1215,6 +1352,4 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=int(os.environ.get("PORT", 8000)),
-        reload=True,
-        workers=1,
     )
