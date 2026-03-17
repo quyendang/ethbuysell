@@ -57,9 +57,8 @@ supabase_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 # ------------------------------------------------------------------
 # 2) RSI BOT CONFIG
 # ------------------------------------------------------------------
-PUSHOVER_TOKEN = os.getenv("PUSHOVER_TOKEN", "")
-PUSHOVER_USER = os.getenv("PUSHOVER_USER", "")
-PUSHOVER_DEVICE = os.getenv("PUSHOVER_DEVICE", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_IDS = [cid.strip() for cid in os.getenv("TELEGRAM_CHAT_IDS", "").split(",") if cid.strip()]
 RSI_SYMBOLS = [s.strip() for s in os.getenv("RSI_SYMBOLS", "ETHUSDT,BTCUSDT").split(",") if s.strip()] or ["ETHUSDT", "BTCUSDT"]
 RSI_PERIOD = int(os.getenv("RSI_PERIOD", "14"))
 RSI_CHECK_MINUTES = int(os.getenv("RSI_CHECK_MINUTES", "5"))
@@ -279,23 +278,16 @@ def _rsi_latest(symbol: str, interval: str, period: int):
     return price, rsi
 
 
-def _pushover_notify(title: str, message: str):
-    if not PUSHOVER_TOKEN or not PUSHOVER_USER:
+def _telegram_notify(title: str, message: str):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_IDS:
         return
-    data = {
-        "token": PUSHOVER_TOKEN,
-        "user": PUSHOVER_USER,
-        "title": title,
-        "message": message,
-        "priority": 0,
-        "sound": "cash",
-    }
-    if PUSHOVER_DEVICE:
-        data["device"] = PUSHOVER_DEVICE
-    try:
-        requests.post("https://api.pushover.net/1/messages.json", data=data, timeout=15)
-    except Exception:
-        pass
+    text = f"<b>{title}</b>\n{message}"
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    for chat_id in TELEGRAM_CHAT_IDS:
+        try:
+            requests.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"}, timeout=15)
+        except Exception:
+            pass
 
 
 def _fmt_dual(tf: str, condition: str, snapshot: Dict[str, Dict[str, float]]):
@@ -784,10 +776,10 @@ def _rsi_check_once():
                 continue
             prev = _rsi_last_state.get(sym, {}).get(tf, "unknown")
             if rsi < 30 and prev != "oversold":
-                _pushover_notify(f"RSI Oversold {tf} — {sym}", _fmt_dual(tf, "<30", tf_snap))
+                _telegram_notify(f"RSI Oversold {tf} — {sym}", _fmt_dual(tf, "<30", tf_snap))
                 _rsi_last_state[sym][tf] = "oversold"
             elif rsi > 70 and prev != "overbought":
-                _pushover_notify(f"RSI Overbought {tf} — {sym}", _fmt_dual(tf, ">70", tf_snap))
+                _telegram_notify(f"RSI Overbought {tf} — {sym}", _fmt_dual(tf, ">70", tf_snap))
                 _rsi_last_state[sym][tf] = "overbought"
             elif 30 <= rsi <= 70 and prev != "normal":
                 _rsi_last_state[sym][tf] = "normal"
@@ -964,7 +956,7 @@ def run_symbol_tracker_once(symbol: str, send_notify: bool = False) -> Dict[str,
                 f"BTC RSI H4: {btc_rsi_h4:.1f}, BTC hist: {btc_macd_hist:.4f}",
                 f"Time (UTC): {now_utc}",
             ]
-            _pushover_notify(title, "\n".join(msg_lines))
+            _telegram_notify(title, "\n".join(msg_lines))
         except Exception as e:
             logging.error(f"[SYMBOL_TRACKER_NOTIFY] Error: {e}")
 
