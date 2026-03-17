@@ -63,6 +63,9 @@ RSI_SYMBOLS = [s.strip() for s in os.getenv("RSI_SYMBOLS", "ETHUSDT,BTCUSDT").sp
 RSI_PERIOD = int(os.getenv("RSI_PERIOD", "14"))
 RSI_CHECK_MINUTES = int(os.getenv("RSI_CHECK_MINUTES", "5"))
 RSI_TIMEFRAMES = {"1h": "1h", "4h": "4h", "1d": "1d"}
+# Minimum minutes between repeated notifications for the same symbol+action.
+# Default: 240 min (4h) — matches the default tracking interval.
+NOTIFY_COOLDOWN_MINUTES = int(os.getenv("NOTIFY_COOLDOWN_MINUTES", "240"))
 
 # ETH TRACKER CONFIG
 ETH_TRACKER_SYMBOL = os.getenv("ETH_TRACKER_SYMBOL", "ETHUSDT")
@@ -100,6 +103,8 @@ OPENROUTER_MODEL   = os.getenv("OPENROUTER_MODEL", "google/gemini-flash-1.5")
 _rsi_last_state: Dict[str, Dict[str, str]] = {sym: {tf: "unknown" for tf in RSI_TIMEFRAMES} for sym in RSI_SYMBOLS}
 _rsi_last_values: Dict[str, Dict[str, Dict[str, float]]] = {}
 _rsi_last_run: float = 0.0
+# Notification cooldown: tracks last sent timestamp per "SYMBOL_ACTION" key
+_notify_last_sent: Dict[str, float] = {}
 
 # Router
 _rsi_router = APIRouter()
@@ -276,6 +281,21 @@ def _rsi_latest(symbol: str, interval: str, period: int):
     rsi = _rsi_wilder(closes, period=period)
     price = closes[-1]
     return price, rsi
+
+
+def _can_notify(symbol: str, action: str) -> bool:
+    """Return True if enough time has passed since the last notification for this symbol+action."""
+    key = f"{symbol}_{action}"
+    last = _notify_last_sent.get(key, 0.0)
+    return (time.time() - last) >= NOTIFY_COOLDOWN_MINUTES * 60
+
+
+def _mark_notified(symbol: str, action: str) -> None:
+    """Record that a notification was just sent for symbol+action."""
+    _notify_last_sent[f"{symbol}_{action}"] = time.time()
+    # When BUY fires, reset SELL cooldown (and vice versa) so a direction flip always notifies.
+    opposite = "SELL" if action == "BUY" else "BUY"
+    _notify_last_sent.pop(f"{symbol}_{opposite}", None)
 
 
 def _telegram_notify(title: str, message: str):
@@ -1231,7 +1251,8 @@ def run_symbol_tracker_once(symbol: str, send_notify: bool = False) -> Dict[str,
         },
     }
 
-    if send_notify and action != "HOLD":
+    if send_notify and action != "HOLD" and _can_notify(symbol, action):
+        _mark_notified(symbol, action)
         try:
             title = f"[{action}] {symbol}"
             # Fetch ATR for stop loss levels
@@ -1310,11 +1331,11 @@ def save_signal_to_db(
     """
     Persist a BUY or SELL signal to the signal_history table.
     Duplicate-guard: skip if the same symbol+timeframe+signal_type was saved
-    in the last 30 minutes (prevents duplicate alerts from reruns).
+    within NOTIFY_COOLDOWN_MINUTES (prevents duplicate DB rows from reruns).
     """
     try:
         from datetime import timezone, timedelta
-        cutoff_dt = datetime.now(tz=timezone.utc) - timedelta(minutes=30)
+        cutoff_dt = datetime.now(tz=timezone.utc) - timedelta(minutes=NOTIFY_COOLDOWN_MINUTES)
         cutoff = cutoff_dt.isoformat()
 
         # Duplicate-guard: skip if same signal fired within last 30 minutes
@@ -1329,7 +1350,7 @@ def save_signal_to_db(
             .execute()
         )
         if check.data:
-            logging.info(f"[SIGNAL_DB] Skip duplicate {signal_type} {symbol} (within 30m)")
+            logging.info(f"[SIGNAL_DB] Skip duplicate {signal_type} {symbol} (within {NOTIFY_COOLDOWN_MINUTES}m)")
             return
 
         supabase_admin.table("signal_history").insert({
