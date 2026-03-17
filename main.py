@@ -306,42 +306,31 @@ def _compute_rsi_series(closes: list[float], period: int) -> list[float]:
     """
     Tính RSI series classic từ list closes.
     Trả về list có cùng độ dài với closes (các giá trị đầu có thể bằng None -> thay bằng 50).
+    Uses Wilder's smoothing (same as _rsi_wilder) for consistency.
     """
     if len(closes) < period + 2:
         return [50.0] * len(closes)
-
-    gains = []
-    losses = []
-
+    gains, losses = [], []
     for i in range(1, len(closes)):
-        change = closes[i] - closes[i - 1]
-        gains.append(max(change, 0.0))
-        losses.append(max(-change, 0.0))
-
-    def ema(series, p):
-        alpha = 2 / (p + 1)
-        ema_vals = []
-        prev = sum(series[:p]) / p
-        ema_vals.append(prev)
-        for v in series[p:]:
-            prev = alpha * v + (1 - alpha) * prev
-            ema_vals.append(prev)
-        return ema_vals
-
-    avg_gain = ema(gains, period)
-    avg_loss = ema(losses, period)
-
+        diff = closes[i] - closes[i - 1]
+        gains.append(max(diff, 0.0))
+        losses.append(max(-diff, 0.0))
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
     rsi = [50.0] * len(closes)
-    offset = len(closes) - len(avg_gain)
-    for i in range(len(avg_gain)):
-        if avg_loss[i] == 0:
-            rs = float('inf')
-            r = 100.0
+    # seed
+    if avg_loss == 0:
+        rsi[period] = 100.0
+    else:
+        rsi[period] = 100 - (100 / (1 + avg_gain / avg_loss))
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        idx = i + 1
+        if avg_loss == 0:
+            rsi[idx] = 100.0
         else:
-            rs = avg_gain[i] / avg_loss[i]
-            r = 100 - (100 / (1 + rs))
-        rsi[offset + i] = r
-
+            rsi[idx] = 100 - (100 / (1 + avg_gain / avg_loss))
     return rsi
 
 
@@ -470,37 +459,218 @@ def _williams_r(
     return out
 
 
+def _compute_atr_series(
+    highs: list[float], lows: list[float], closes: list[float], period: int = 14
+) -> list[float]:
+    """ATR series using Wilder smoothing. Returns list same length as closes, None for early bars."""
+    n = len(closes)
+    if n < 2:
+        return [None] * n
+    tr_series = [None]
+    for i in range(1, n):
+        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
+        tr_series.append(tr)
+    atr_series = [None] * n
+    if n <= period:
+        return atr_series
+    seed = sum(tr_series[1:period+1]) / period
+    atr_series[period] = seed
+    prev = seed
+    for i in range(period + 1, n):
+        prev = (prev * (period - 1) + tr_series[i]) / period
+        atr_series[i] = prev
+    return atr_series
+
+
+def _compute_adx(
+    highs: list[float], lows: list[float], closes: list[float], period: int = 14
+) -> dict:
+    """Compute latest ADX, +DI, -DI for trend strength detection."""
+    n = len(closes)
+    if n < period * 2 + 5:
+        return {"adx": 20.0, "di_plus": 20.0, "di_minus": 20.0, "trending": False, "strong": False}
+    tr_list, dmp_list, dmm_list = [0.0], [0.0], [0.0]
+    for i in range(1, n):
+        tr = max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1]))
+        tr_list.append(tr)
+        up, down = highs[i]-highs[i-1], lows[i-1]-lows[i]
+        dmp_list.append(up if up > down and up > 0 else 0.0)
+        dmm_list.append(down if down > up and down > 0 else 0.0)
+    def _wilder(s, p):
+        r = [sum(s[:p])]
+        for v in s[p:]:
+            r.append(r[-1] - r[-1]/p + v)
+        return r
+    atr_s = _wilder(tr_list, period)
+    dmp_s = _wilder(dmp_list, period)
+    dmm_s = _wilder(dmm_list, period)
+    di_p = [100*d/a if a > 0 else 0 for d, a in zip(dmp_s, atr_s)]
+    di_m = [100*d/a if a > 0 else 0 for d, a in zip(dmm_s, atr_s)]
+    dx_s = [100*abs(p-m)/(p+m) if (p+m) > 0 else 0 for p, m in zip(di_p, di_m)]
+    if len(dx_s) < period:
+        return {"adx": 20.0, "di_plus": 20.0, "di_minus": 20.0, "trending": False, "strong": False}
+    adx_s = _wilder(dx_s, period)
+    adx = adx_s[-1]
+    return {
+        "adx": round(adx, 2),
+        "di_plus": round(di_p[-1], 2),
+        "di_minus": round(di_m[-1], 2),
+        "trending": adx > 22.0,
+        "strong": adx > 30.0,
+    }
+
+
+def compute_dynamic_rsi_thresholds(
+    rsi_series: list[float], lookback: int = 100,
+) -> tuple[float, float]:
+    """
+    Compute adaptive RSI oversold/overbought thresholds from recent RSI distribution.
+    Returns (oversold_threshold, overbought_threshold).
+    """
+    recent = [r for r in rsi_series[-lookback:] if r is not None and r > 0]
+    if len(recent) < 20:
+        return 40.0, 60.0
+    s = sorted(recent)
+    n = len(s)
+    def pct(data, p):
+        idx = (len(data)-1) * p / 100.0
+        lo, hi = int(idx), min(int(idx)+1, len(data)-1)
+        return data[lo] + (data[hi]-data[lo]) * (idx-lo)
+    oversold = max(25.0, min(50.0, pct(s, 20)))
+    overbought = max(50.0, min(78.0, pct(s, 80)))
+    if overbought - oversold < 10.0:
+        mid = (oversold + overbought) / 2
+        oversold, overbought = mid - 5.0, mid + 5.0
+    return round(oversold, 1), round(overbought, 1)
+
+
+def compute_obv_signals(
+    closes: list[float], volumes: list[float], lookback: int = 8
+) -> dict:
+    """
+    Compute OBV trend and VWAP position for volume-based scoring.
+    Returns buy_vol_score (0-3) and sell_vol_score (0-3).
+    """
+    n = len(closes)
+    if n < 2 or not volumes:
+        return {"buy_vol_score": 0, "sell_vol_score": 0, "obv_trend": "flat", "price_vs_vwap": "near"}
+    obv = [0.0]
+    for i in range(1, n):
+        if closes[i] > closes[i-1]:
+            obv.append(obv[-1] + volumes[i])
+        elif closes[i] < closes[i-1]:
+            obv.append(obv[-1] - volumes[i])
+        else:
+            obv.append(obv[-1])
+    w = min(lookback, n)
+    half = max(1, w // 2)
+    obv_start = sum(obv[-w:-half]) / half if half < w else obv[-w]
+    obv_end = sum(obv[-half:]) / half
+    change = (obv_end - obv_start) / (abs(obv_start) + 1e-9)
+    obv_trend = "up" if change > 0.005 else ("down" if change < -0.005 else "flat")
+    vw = min(20, n)
+    avg_vol = sum(volumes[-vw:]) / vw
+    curr_vol = volumes[-1]
+    vol_spike = curr_vol > avg_vol * 1.5
+    candle_up = closes[-1] > closes[-2]
+    candle_dn = closes[-1] < closes[-2]
+    price_change = abs(closes[-1] - closes[-2]) / closes[-2] if closes[-2] > 0 else 0
+    obv_bull_div = closes[-1] < closes[max(0, n-10)] and obv[-1] > obv[max(0, n-10)]
+    obv_bear_div = closes[-1] > closes[max(0, n-10)] and obv[-1] < obv[max(0, n-10)]
+    buy_score = 0
+    sell_score = 0
+    if obv_trend == "up": buy_score += 1
+    if obv_bull_div: buy_score += 2
+    if vol_spike and candle_up and price_change > 0.003: buy_score += 1
+    if obv_trend == "down": sell_score += 1
+    if obv_bear_div: sell_score += 2
+    if vol_spike and candle_dn and price_change > 0.003: sell_score += 1
+    return {
+        "buy_vol_score": min(buy_score, 3),
+        "sell_vol_score": min(sell_score, 3),
+        "obv_trend": obv_trend,
+        "vol_spike": vol_spike,
+    }
+
+
+def _fetch_fear_greed() -> dict:
+    """Fetch Fear & Greed Index from alternative.me. Cached by caching the result in module-level dict."""
+    try:
+        resp = requests.get(
+            "https://api.alternative.me/fng/",
+            params={"limit": 1, "format": "json"},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        entry = resp.json()["data"][0]
+        value = int(entry["value"])
+        return {
+            "value": value,
+            "buy_adj": 2 if value <= 20 else (1 if value <= 35 else 0),
+            "sell_adj": 2 if value >= 80 else (1 if value >= 65 else 0),
+        }
+    except Exception:
+        return {"value": 50, "buy_adj": 0, "sell_adj": 0}
+
+
+def _fetch_funding_rate(symbol: str) -> dict:
+    """Fetch latest funding rate from Binance Futures. Returns empty dict if unavailable."""
+    try:
+        resp = requests.get(
+            "https://fapi.binance.com/fapi/v1/premiumIndex",
+            params={"symbol": symbol},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        fr = float(data.get("lastFundingRate", 0))
+        return {
+            "funding_rate": fr,
+            "funding_rate_pct": fr * 100,
+            "buy_adj": 1 if fr < -0.0002 else (-2 if fr > 0.0005 else 0),
+            "sell_adj": 2 if fr > 0.0005 else (0 if fr > 0 else -1),
+        }
+    except Exception:
+        return {"funding_rate": 0.0, "funding_rate_pct": 0.0, "buy_adj": 0, "sell_adj": 0}
+
+
 # ------------------------------------------------------------------
 # 3b) D1 BIAS + CANDLE SIGNALS
 # ------------------------------------------------------------------
 def compute_d1_bias(symbol: str) -> tuple[bool, bool]:
     """
     Fetch D1 klines and return (d1_bullish, d1_bearish).
-    Uses EMA34/89 for trend direction and EMA200 as macro filter.
+    ADX-gated: only trust EMA cross when ADX > 22 (real trend, not sideways noise).
     """
     klines_d1 = _rsi_fetch_klines(symbol, "1d", limit=250)
     closes_d1 = [float(k[4]) for k in klines_d1]
-    ema34_d1  = _compute_ema_series(closes_d1, 34)
-    ema89_d1  = _compute_ema_series(closes_d1, 89)
+    highs_d1 = [float(k[2]) for k in klines_d1]
+    lows_d1 = [float(k[3]) for k in klines_d1]
+    ema34_d1 = _compute_ema_series(closes_d1, 34)
+    ema89_d1 = _compute_ema_series(closes_d1, 89)
     ema200_d1 = _compute_ema_series(closes_d1, 200)
     _, _, hist_d1 = _compute_macd_series(closes_d1, MACD_FAST, MACD_SLOW, MACD_SIGNAL)
-    e34  = ema34_d1[-1]
-    e89  = ema89_d1[-1]
+    adx_data = _compute_adx(highs_d1, lows_d1, closes_d1, period=14)
+    e34 = ema34_d1[-1]
+    e89 = ema89_d1[-1]
     e200 = ema200_d1[-1]
-    h    = hist_d1[-1]
-    p    = closes_d1[-1]
-    # Bullish: short EMA above medium EMA, price above macro EMA200, MACD not deeply negative
-    d1_bullish = (
+    h = hist_d1[-1]
+    p = closes_d1[-1]
+    macd_threshold = p * 0.0001
+    raw_bullish = (
         e34 is not None and e89 is not None and e34 > e89
         and (e200 is None or p > e200)
-        and h is not None and h > -0.5
+        and h is not None and h > -macd_threshold
     )
-    # Bearish: short EMA below medium EMA, price below EMA200, MACD not positive
-    d1_bearish = (
+    raw_bearish = (
         e34 is not None and e89 is not None and e34 < e89
         and (e200 is None or p < e200)
-        and h is not None and h < 0.5
+        and h is not None and h < macd_threshold
     )
+    # Only trust bias when market is actually trending (ADX > 22)
+    is_trending = adx_data["trending"]
+    d1_bullish = raw_bullish and is_trending
+    d1_bearish = raw_bearish and is_trending
     return d1_bullish, d1_bearish
 
 
@@ -509,7 +679,8 @@ def compute_candle_signals(
     ema34, ema50, ema89, ema200,
     sma_50, sma_150, bb_upper, bb_lower, stoch_k, williams_r,
     buy_zone_low, buy_zone_high, sell_zone_low, sell_zone_high,
-    d1_bullish, d1_bearish, btc_rsi_h4, btc_macd_hist
+    d1_bullish, d1_bearish, btc_rsi_h4, btc_macd_hist,
+    atr_series=None, volumes=None, fng_adj=None, funding_adj=None,
 ) -> list[dict]:
     """
     Weighted scoring signal engine.
@@ -534,6 +705,10 @@ def compute_candle_signals(
     n = len(closes)
     results = []
 
+    # Pre-compute OBV signals once for the full series (used for latest candle scoring)
+    _obv_signals = compute_obv_signals(closes, volumes or []) if volumes else {"buy_vol_score": 0, "sell_vol_score": 0}
+    _dyn_oversold, _dyn_overbought = compute_dynamic_rsi_thresholds(rsi, lookback=100)
+
     for i in range(n):
         price  = closes[i]
         rsi_i  = rsi[i]       if i < len(rsi)       else None
@@ -546,6 +721,17 @@ def compute_candle_signals(
         bb_l   = bb_lower[i]  if i < len(bb_lower)  else None
         sk     = stoch_k[i]   if i < len(stoch_k)   else None
         wr_i   = williams_r[i] if i < len(williams_r) else None
+        atr_i = atr_series[i] if atr_series and i < len(atr_series) else None
+
+        # Volatility regime: skip signal in extreme conditions
+        vol_extreme = False
+        vol_high = False
+        if atr_i is not None and price > 0:
+            atr_pct = atr_i / price * 100
+            if atr_pct > 5.0:
+                vol_extreme = True
+            elif atr_pct > 3.0:
+                vol_high = True
 
         # ── BUY SCORE ─────────────────────────────────────────────
         buy_score = 0
@@ -568,6 +754,15 @@ def compute_candle_signals(
             if wr_i is not None and wr_i < -70: buy_score += 1
             if d1_bullish:                    buy_score += 2
             if bb_l is not None and price <= bb_l: buy_score += 1
+            # Dynamic RSI threshold (adaptive)
+            if rsi_i is not None and rsi_i < _dyn_oversold:
+                buy_score += 1
+            # Volume confirmation (only apply to recent candles - last 3)
+            if i >= n - 3:
+                buy_score += _obv_signals["buy_vol_score"]
+            # On-chain adjustments (macro, apply to all candles in zone)
+            if fng_adj: buy_score += fng_adj.get("buy_adj", 0)
+            if funding_adj: buy_score += funding_adj.get("buy_adj", 0)
 
         # ── SELL SCORE ────────────────────────────────────────────
         sell_score = 0
@@ -589,6 +784,15 @@ def compute_candle_signals(
             if wr_i is not None and wr_i > -30: sell_score += 1
             if d1_bearish:                      sell_score += 2
             if bb_u is not None and price >= bb_u: sell_score += 1
+            # Dynamic RSI threshold (adaptive)
+            if rsi_i is not None and rsi_i > _dyn_overbought:
+                sell_score += 1
+            # Volume confirmation (only apply to recent candles - last 3)
+            if i >= n - 3:
+                sell_score += _obv_signals["sell_vol_score"]
+            # On-chain adjustments
+            if fng_adj: sell_score += fng_adj.get("sell_adj", 0)
+            if funding_adj: sell_score += funding_adj.get("sell_adj", 0)
 
         # ── DANGER ZONE (display tint + buy blocker) ─────────────
         dz_flags = []
@@ -612,6 +816,15 @@ def compute_candle_signals(
         # ── FINAL SIGNALS ─────────────────────────────────────────
         is_buy_signal  = buy_score  >= 4 and not buy_blocked
         is_sell_signal = sell_score >= 4 and not sell_blocked
+
+        # Extreme volatility: suppress all signals (flash crash / pump protection)
+        if vol_extreme:
+            is_buy_signal = False
+            is_sell_signal = False
+        elif vol_high:
+            # High volatility: require stronger conviction
+            is_buy_signal = buy_score >= 6 and not buy_blocked
+            is_sell_signal = sell_score >= 6 and not sell_blocked
 
         buy_strength  = 3 if buy_score  >= 9 else (2 if buy_score  >= 6 else 1)
         sell_strength = 3 if sell_score >= 9 else (2 if sell_score >= 6 else 1)
@@ -640,6 +853,26 @@ def compute_candle_signals(
             parts.append(f"zone={zone} b={buy_score} s={sell_score}")
         signal_detail = " | ".join(parts)
 
+        # ATR-based stop loss and take profit levels
+        atr_levels = {}
+        if atr_i and price > 0:
+            mult = 1.5 if signal_strength == 3 else 2.0
+            risk = mult * atr_i
+            if is_buy_signal:
+                atr_levels = {
+                    "stop_loss": round(price - risk, 2),
+                    "take_profit": round(price + 2 * risk, 2),
+                    "atr": round(atr_i, 4),
+                    "atr_pct": round(atr_i / price * 100, 2),
+                }
+            elif is_sell_signal:
+                atr_levels = {
+                    "stop_loss": round(price + risk, 2),
+                    "take_profit": round(price - 2 * risk, 2),
+                    "atr": round(atr_i, 4),
+                    "atr_pct": round(atr_i / price * 100, 2),
+                }
+
         results.append({
             "is_buy_signal":   bool(is_buy_signal),
             "is_sell_signal":  bool(is_sell_signal),
@@ -649,6 +882,7 @@ def compute_candle_signals(
             "sell_score":      sell_score,
             "zone":            zone,
             "signal_detail":   signal_detail,
+            "atr_levels":      atr_levels,
         })
 
     return results
@@ -948,14 +1182,36 @@ def run_symbol_tracker_once(symbol: str, send_notify: bool = False) -> Dict[str,
     if send_notify and action != "HOLD":
         try:
             title = f"[{action}] {symbol}"
+            # Fetch ATR for stop loss levels
+            try:
+                kl_atr = _rsi_fetch_klines(symbol, interval, limit=50)
+                h_atr = [float(k[2]) for k in kl_atr]
+                l_atr = [float(k[3]) for k in kl_atr]
+                c_atr = [float(k[4]) for k in kl_atr]
+                atr_s = _compute_atr_series(h_atr, l_atr, c_atr)
+                atr_val = next((v for v in reversed(atr_s) if v is not None), None)
+            except Exception:
+                atr_val = None
+
             msg_lines = [
-                f"Price: {price}",
-                f"Reason: {reason}",
-                f"RSI H4: {rsi_h4:.2f}",
-                f"MACD: {macd_line:.4f} | Signal: {macd_signal:.4f} | Hist: {macd_hist:.4f}",
-                f"BTC RSI H4: {btc_rsi_h4:.1f}, BTC hist: {btc_macd_hist:.4f}",
-                f"Time (UTC): {now_utc}",
+                f"💰 Giá: <b>{price:,.2f}</b> USDT",
+                f"📊 RSI H4: {rsi_h4:.1f} | MACD Hist: {macd_hist:.4f}",
+                f"🎯 Zone: BUY[{buy_low:.1f}-{buy_high:.1f}] SELL[{sell_low:.1f}-{sell_high:.1f}]",
+                f"₿ BTC RSI: {btc_rsi_h4:.1f} | BTC MACD: {btc_macd_hist:.4f}",
             ]
+            if atr_val:
+                mult = 2.0
+                risk = mult * atr_val
+                if action == "BUY":
+                    sl = price - risk
+                    tp = price + 2 * risk
+                    msg_lines.append(f"🛑 SL: {sl:,.2f} | 🎯 TP: {tp:,.2f} (ATR×{mult})")
+                else:
+                    sl = price + risk
+                    tp = price - 2 * risk
+                    msg_lines.append(f"🛑 SL: {sl:,.2f} | 🎯 TP: {tp:,.2f} (ATR×{mult})")
+                msg_lines.append(f"📐 ATR: {atr_val:.2f} ({atr_val/price*100:.2f}%)")
+            msg_lines.append(f"⏰ {now_utc}")
             _telegram_notify(title, "\n".join(msg_lines))
         except Exception as e:
             logging.error(f"[SYMBOL_TRACKER_NOTIFY] Error: {e}")
@@ -1035,6 +1291,13 @@ def symbols_tracker_job():
     except Exception as e:
         logging.error(f"[SYMBOL_TRACKER_JOB] Error fetch subscriptions: {e}")
         return
+
+    # Fetch market sentiment once per job run
+    try:
+        fng = _fetch_fear_greed()
+        logging.info(f"[TRACKER_JOB] F&G Index: {fng['value']}")
+    except Exception:
+        pass
 
     for row in rows:
         symbol = (row.get("symbol") or "").upper()
@@ -1259,6 +1522,15 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
     stoch_k = stoch_k[-min_len:]
     williams_r_vals = williams_r_vals[-min_len:]
 
+    # ATR series for volatility regime + stop loss
+    atr_vals = _compute_atr_series(highs_trimmed, lows_trimmed, closes_trimmed)
+    # OBV signals
+    obv_sig = compute_obv_signals(closes_trimmed, volumes_trimmed)
+    # Fear & Greed (macro sentiment)
+    fng_data = _fetch_fear_greed()
+    # Funding rate (on-chain leverage)
+    funding_data = _fetch_funding_rate(symbol)
+
     rows_json: List[Dict[str, Any]] = []
     for i in range(min_len):
         rows_json.append(
@@ -1281,6 +1553,8 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
                 "bb_lower": bb_lower[i],
                 "stoch_k": stoch_k[i],
                 "wr": williams_r_vals[i],
+                "atr": atr_vals[i] if i < len(atr_vals) else None,
+                "obv_trend": obv_sig["obv_trend"],
             }
         )
 
@@ -1326,6 +1600,10 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
         d1_bearish=d1_bearish,
         btc_rsi_h4=btc_rsi_h4,
         btc_macd_hist=btc_macd_hist_val,
+        atr_series=atr_vals,
+        volumes=volumes_trimmed,
+        fng_adj=fng_data,
+        funding_adj=funding_data,
     )
 
     # Merge signal data into rows_json
@@ -1441,6 +1719,8 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
         "d1_bearish": d1_bearish,
         "ai_analysis": ai_analysis,
         "db_signals_json": db_signals_json,
+        "fng_value": fng_data.get("value", 50),
+        "funding_rate_pct": funding_data.get("funding_rate_pct", 0.0),
     }
 
     return templates.TemplateResponse("symbol_dashboard.html", context)
