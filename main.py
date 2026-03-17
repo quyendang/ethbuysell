@@ -2,9 +2,11 @@
 # ===============================
 # main.py — FastAPI + Supabase + RSI Bot (ETHUSDT & BTCUSDT)
 # ===============================
+import asyncio
 import os
 import json
 import time
+import threading
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -136,12 +138,38 @@ def _rsi_wilder(closes: List[float], period: int = 14) -> float:
     return float(100 - (100 / (1 + rs)))
 
 
+# ── Klines TTL cache (5 min) — eliminates duplicate Binance fetches ──────────
+_klines_cache: Dict[str, tuple] = {}   # key=(symbol_interval) -> (ts, data[250])
+_klines_cache_lock = threading.Lock()
+KLINES_CACHE_TTL = 300  # seconds
+
+
 def _rsi_fetch_klines(symbol: str, interval: str, limit: int = 200):
+    """Fetch klines from Binance with a 5-minute in-memory cache.
+
+    Always fetches 250 candles internally and slices to `limit`, so all
+    calls for the same (symbol, interval) share the same cache entry
+    regardless of the requested limit.
+    """
+    cache_key = f"{symbol}_{interval}"
+    now = time.time()
+    with _klines_cache_lock:
+        entry = _klines_cache.get(cache_key)
+        if entry and now - entry[0] < KLINES_CACHE_TTL:
+            data = entry[1]
+            return data[-limit:] if len(data) >= limit else data
+
     url = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
+    fetch_limit = max(limit, 250)
+    params = {"symbol": symbol, "interval": interval, "limit": fetch_limit}
     resp = requests.get(url, params=params, timeout=15)
     resp.raise_for_status()
-    return resp.json()
+    data = resp.json()
+
+    with _klines_cache_lock:
+        _klines_cache[cache_key] = (time.time(), data)
+
+    return data[-limit:] if len(data) >= limit else data
 
 
 def _compute_eth_zones_from_range(symbol: str, interval: str, lookback: int = 60):
@@ -911,14 +939,26 @@ def compute_candle_signals(
 # ------------------------------------------------------------------
 # 3c) OPENROUTER AI ANALYSIS
 # ------------------------------------------------------------------
+# Cache AI analysis results for 10 minutes per (symbol, tf)
+_ai_analysis_cache: Dict[str, tuple] = {}   # key -> (ts, result_str)
+AI_ANALYSIS_CACHE_TTL = 600  # seconds
+
+
 def call_openrouter_analysis(symbol: str, tf: str, snap: dict) -> str:
     """
     Build a market snapshot prompt and call OpenRouter API.
     Returns a Vietnamese markdown-formatted analysis string,
     or "" if the API key is not set or the call fails.
+    Cached for 10 minutes per (symbol, tf) to avoid slow AI calls on every page load.
     """
     if not OPENROUTER_API_KEY:
         return ""
+
+    cache_key = f"{symbol}_{tf}"
+    now = time.time()
+    entry = _ai_analysis_cache.get(cache_key)
+    if entry and now - entry[0] < AI_ANALYSIS_CACHE_TTL:
+        return entry[1]
 
     def _fmt(v, decimals=2):
         return f"{v:.{decimals}f}" if v is not None else "N/A"
@@ -1000,7 +1040,9 @@ Không nhắc lại bảng số liệu. Dùng emoji phù hợp. Tối đa 400 t�
             timeout=30,
         )
         resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip()
+        result = resp.json()["choices"][0]["message"]["content"].strip()
+        _ai_analysis_cache[cache_key] = (time.time(), result)
+        return result
     except Exception as e:
         logging.error(f"[OPENROUTER] Error calling {OPENROUTER_MODEL}: {e}")
         return ""
@@ -1529,11 +1571,40 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
         tf = "4h"
     interval = valid_tfs[tf]
 
-    try:
-        klines = _rsi_fetch_klines(symbol, interval, limit=200)
-    except Exception as e:
-        logging.error(f"[SYMBOL DASH] Error fetching klines for {symbol}: {e}")
-        klines = []
+    # ── Parallel network fetches — all independent calls run concurrently ────
+    def _safe_klines():
+        try:
+            return _rsi_fetch_klines(symbol, interval, limit=200)
+        except Exception as e:
+            logging.error(f"[SYMBOL DASH] Error fetching klines for {symbol}: {e}")
+            return []
+
+    def _safe_d1_bias():
+        try:
+            return compute_d1_bias(symbol)
+        except Exception as e:
+            logging.error(f"[SYMBOL DASH] Error computing D1 bias for {symbol}: {e}")
+            return (False, False)
+
+    def _safe_btc_context():
+        try:
+            _, btc_rsi = _rsi_latest("BTCUSDT", interval, RSI_PERIOD)
+            _, _, btc_macd_h, _ = _macd_latest_with_prev("BTCUSDT", interval)
+            return btc_rsi, btc_macd_h
+        except Exception as e:
+            logging.error(f"[SYMBOL DASH] Error fetching BTC context: {e}")
+            return None, None
+
+    klines, d1_result, btc_result, fng_data, funding_data = await asyncio.gather(
+        asyncio.to_thread(_safe_klines),
+        asyncio.to_thread(_safe_d1_bias),
+        asyncio.to_thread(_safe_btc_context),
+        asyncio.to_thread(_fetch_fear_greed),
+        asyncio.to_thread(_fetch_funding_rate, symbol),
+    )
+    d1_bullish, d1_bearish = d1_result
+    btc_rsi_h4, btc_macd_hist_val = btc_result
+    # ─────────────────────────────────────────────────────────────────
 
     labels: List[str] = []
     closes: List[float] = []
@@ -1640,10 +1711,7 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
     atr_vals = _compute_atr_series(highs_trimmed, lows_trimmed, closes_trimmed)
     # OBV signals
     obv_sig = compute_obv_signals(closes_trimmed, volumes_trimmed)
-    # Fear & Greed (macro sentiment)
-    fng_data = _fetch_fear_greed()
-    # Funding rate (on-chain leverage)
-    funding_data = _fetch_funding_rate(symbol)
+    # fng_data and funding_data already fetched in parallel above
 
     rows_json: List[Dict[str, Any]] = []
     for i in range(min_len):
@@ -1672,22 +1740,7 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
             }
         )
 
-    # --- D1 Bias ---
-    d1_bullish = False
-    d1_bearish = False
-    try:
-        d1_bullish, d1_bearish = compute_d1_bias(symbol)
-    except Exception as e:
-        logging.error(f"[SYMBOL DASH] Error computing D1 bias for {symbol}: {e}")
-
-    # --- BTC context for signal computation ---
-    btc_rsi_h4 = None
-    btc_macd_hist_val = None
-    try:
-        _, btc_rsi_h4 = _rsi_latest("BTCUSDT", interval, RSI_PERIOD)
-        _, _, btc_macd_hist_val, _ = _macd_latest_with_prev("BTCUSDT", interval)
-    except Exception as e:
-        logging.error(f"[SYMBOL DASH] Error fetching BTC context: {e}")
+    # d1_bullish, d1_bearish, btc_rsi_h4, btc_macd_hist_val already set from parallel gather above
 
     # --- Compute per-candle signals ---
     signals = compute_candle_signals(
