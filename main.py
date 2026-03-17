@@ -65,7 +65,7 @@ RSI_CHECK_MINUTES = int(os.getenv("RSI_CHECK_MINUTES", "5"))
 RSI_TIMEFRAMES = {"1h": "1h", "4h": "4h", "1d": "1d"}
 # Minimum minutes between repeated notifications for the same symbol+action.
 # Default: 240 min (4h) — matches the default tracking interval.
-NOTIFY_COOLDOWN_MINUTES = int(os.getenv("NOTIFY_COOLDOWN_MINUTES", "240"))
+NOTIFY_COOLDOWN_MINUTES = int(os.getenv("NOTIFY_COOLDOWN_MINUTES", "120"))
 
 # ETH TRACKER CONFIG
 ETH_TRACKER_SYMBOL = os.getenv("ETH_TRACKER_SYMBOL", "ETHUSDT")
@@ -1106,12 +1106,17 @@ def _eth_decide_action(
     btc_rsi_h4: float,
     btc_macd_hist: float,
     btc_prev_macd_hist: float,
+    rsi_buy_threshold: float = None,
+    rsi_sell_threshold: float = None,
 ) -> Dict[str, str]:
     """
     Quyết định BUY/SELL/HOLD với:
     - zones: (sell_low, sell_high, buy_low, buy_high, recent_low, recent_high)
     - BTC filter để tránh bán ngược trend.
+    - rsi_buy/sell_threshold: dynamic thresholds (fallback to ETH_RSI_BUY/SELL env).
     """
+    rsi_buy_thr = rsi_buy_threshold if rsi_buy_threshold is not None else ETH_RSI_BUY
+    rsi_sell_thr = rsi_sell_threshold if rsi_sell_threshold is not None else ETH_RSI_SELL
     sell_low, sell_high, buy_low, buy_high, recent_low, recent_high = zones
 
     reasons: List[str] = []
@@ -1131,21 +1136,21 @@ def _eth_decide_action(
 
     if (
         sell_low <= price <= sell_high
-        and rsi_h4 >= ETH_RSI_SELL
+        and rsi_h4 >= rsi_sell_thr
         and macd_weakening
     ):
         action = "SELL"
         reasons.append(
-            f"Price {price:.1f} in SELL zone & RSI_H4 {rsi_h4:.1f} >= {ETH_RSI_SELL}"
+            f"Price {price:.1f} in SELL zone & RSI_H4 {rsi_h4:.1f} >= {rsi_sell_thr:.1f}"
         )
         reasons.append(
             f"MACD hist weakening: current {macd_hist:.4f} < prev {prev_macd_hist:.4f}"
         )
 
-    elif buy_low <= price <= buy_high and rsi_h4 <= ETH_RSI_BUY:
+    elif buy_low <= price <= buy_high and rsi_h4 <= rsi_buy_thr:
         action = "BUY"
         reasons.append(
-            f"Price {price:.1f} in BUY zone & RSI_H4 {rsi_h4:.1f} <= {ETH_RSI_BUY}"
+            f"Price {price:.1f} in BUY zone & RSI_H4 {rsi_h4:.1f} <= {rsi_buy_thr:.1f}"
         )
 
     else:
@@ -1209,6 +1214,16 @@ def run_symbol_tracker_once(symbol: str, send_notify: bool = False) -> Dict[str,
     zones = _compute_eth_zones_from_range(symbol, interval, lookback=60)
     sell_low, sell_high, buy_low, buy_high, recent_low, recent_high = zones
 
+    # Dynamic RSI thresholds — works for any coin, not just ETH
+    rsi_buy_thr = rsi_sell_thr = None
+    try:
+        kl = _rsi_fetch_klines(symbol, interval, limit=150)
+        closes_full = [float(k[4]) for k in kl]
+        rsi_series = _compute_rsi_series(closes_full, RSI_PERIOD)
+        rsi_buy_thr, rsi_sell_thr = compute_dynamic_rsi_thresholds(rsi_series)
+    except Exception:
+        pass
+
     decision = _eth_decide_action(
         price=price,
         rsi_h4=rsi_h4,
@@ -1218,6 +1233,8 @@ def run_symbol_tracker_once(symbol: str, send_notify: bool = False) -> Dict[str,
         btc_rsi_h4=btc_rsi_h4,
         btc_macd_hist=btc_macd_hist,
         btc_prev_macd_hist=btc_prev_macd_hist,
+        rsi_buy_threshold=rsi_buy_thr,
+        rsi_sell_threshold=rsi_sell_thr,
     )
     action = decision["action"]
     reason = decision["reason"]
