@@ -525,7 +525,7 @@
         <div class="whale-stat">
           <div class="whale-label">⚖️ Net Flow</div>
           {% set nf = whale_net_flow_usd | default(0) %}
-          <div class="whale-value {% if nf > 0 %}bear{% elif nf < 0 %}bull{% endif %}">${{ "%+,.0f"|format(nf) }}</div>
+          <div class="whale-value {% if nf > 0 %}bear{% elif nf < 0 %}bull{% endif %}">{% if nf >= 0 %}+{% endif %}${{ nf|abs|comma }}</div>
           <div class="whale-sub">{{ whale_tx_count | default(0) }} txns tracked</div>
         </div>
       </div>
