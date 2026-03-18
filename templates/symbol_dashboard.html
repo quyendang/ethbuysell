@@ -246,6 +246,42 @@
       margin-bottom: 14px;
     }
 
+    /* Whale flow panel */
+    .whale-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      padding: 4px 0;
+    }
+    @media (max-width: 600px) {
+      .whale-grid { grid-template-columns: 1fr; }
+    }
+    .whale-stat {
+      background: #0f172a;
+      border-radius: 10px;
+      padding: 14px 16px;
+      border: 1px solid #1e293b;
+    }
+    .whale-label {
+      font-size: 0.75rem;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 6px;
+    }
+    .whale-value {
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: #cbd5e1;
+    }
+    .whale-value.bull { color: #34d399; }
+    .whale-value.bear { color: #f87171; }
+    .whale-sub {
+      font-size: 0.78rem;
+      color: #475569;
+      margin-top: 4px;
+    }
+
     .ai-panel .panel-title .sub { color: #94a3b8; }
 
     .ai-badge {
@@ -457,6 +493,42 @@
         <span class="sub">{{ tf }}</span>
       </div>
       <canvas id="volumeChart" height="100"></canvas>
+    </section>
+
+    <!-- WHALE FLOW PANEL -->
+    <section class="panel">
+      <div class="panel-title">
+        <div>
+          🐋 Whale On-chain Flow
+          <span class="sub">~50 giao dịch lớn gần nhất</span>
+        </div>
+        {% set wfs = whale_flow_signal | default('neutral') %}
+        {% if wfs == 'bullish' %}
+          <span class="d1-badge d1-bull">BULLISH FLOW</span>
+        {% elif wfs == 'bearish' %}
+          <span class="d1-badge d1-bear">BEARISH FLOW</span>
+        {% else %}
+          <span class="d1-badge d1-neutral">NEUTRAL FLOW</span>
+        {% endif %}
+      </div>
+      <div class="whale-grid">
+        <div class="whale-stat">
+          <div class="whale-label">📥 Exchange Inflow (bán)</div>
+          <div class="whale-value bear">${{ "{:,.0f}".format(whale_inflow_usd | default(0)) }}</div>
+          <div class="whale-sub">ETH: {{ "{:,.1f}".format(whale_eth_inflow | default(0)) }}</div>
+        </div>
+        <div class="whale-stat">
+          <div class="whale-label">📤 Exchange Outflow (gom)</div>
+          <div class="whale-value bull">${{ "{:,.0f}".format(whale_outflow_usd | default(0)) }}</div>
+          <div class="whale-sub">ETH: {{ "{:,.1f}".format(whale_eth_outflow | default(0)) }}</div>
+        </div>
+        <div class="whale-stat">
+          <div class="whale-label">⚖️ Net Flow</div>
+          {% set nf = whale_net_flow_usd | default(0) %}
+          <div class="whale-value {% if nf > 0 %}bear{% elif nf < 0 %}bull{% endif %}">${{ "%+,.0f"|format(nf) }}</div>
+          <div class="whale-sub">{{ whale_tx_count | default(0) }} txns tracked</div>
+        </div>
+      </div>
     </section>
 
     <!-- AI MARKET ANALYSIS -->

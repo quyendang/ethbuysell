@@ -75,6 +75,11 @@ ETH_TRACKER_INTERVAL = os.getenv("ETH_TRACKER_INTERVAL", "4h")
 ETH_CYCLE_SIZE = float(os.getenv("ETH_CYCLE_SIZE", "40"))
 ETH_BASE_BALANCE = float(os.getenv("ETH_BASE_BALANCE", "138"))
 
+WHALE_API_URL = os.getenv(
+    "WHALE_API_URL",
+    "https://residential-andra-ethbot-174f656d.koyeb.app/api/v1/transactions",
+)
+
 BIG_ORDER_THRESHOLD = 100_000
 INTERVAL_MS_MAP = {
     "1m": 60_000,
@@ -682,6 +687,75 @@ def _fetch_funding_rate(symbol: str) -> dict:
         return {"funding_rate": 0.0, "funding_rate_pct": 0.0, "buy_adj": 0, "sell_adj": 0}
 
 
+_EXCHANGE_LABELS = {"binance", "coinbase", "okx", "kraken", "bybit", "huobi", "kucoin", "gate", "bitfinex"}
+
+
+def _fetch_whale_flow(page_size: int = 50) -> dict:
+    """
+    Fetch recent large transactions from the whale API and compute on-chain flow metrics.
+
+    Exchange inflow  (whale → exchange) = selling pressure  → bearish
+    Exchange outflow (exchange → whale) = accumulation      → bullish
+    Returns a dict with flow amounts, ETH counts, flow_signal, and score adjustments.
+    """
+    _empty = {
+        "inflow_usd": 0.0, "outflow_usd": 0.0, "net_flow_usd": 0.0,
+        "eth_inflow": 0.0, "eth_outflow": 0.0,
+        "total_volume_usd": 0.0, "large_tx_count": 0,
+        "flow_signal": "neutral", "buy_adj": 0, "sell_adj": 0,
+    }
+    try:
+        resp = requests.get(WHALE_API_URL, params={"page_size": page_size}, timeout=10)
+        resp.raise_for_status()
+        items = resp.json().get("items", [])
+
+        inflow_usd = outflow_usd = eth_inflow = eth_outflow = total_usd = 0.0
+        for tx in items:
+            amt_usd = float(tx.get("amount_usd") or 0)
+            amt_native = float(tx.get("amount_native") or 0)
+            sym = (tx.get("native_symbol") or "").upper()
+            to_lbl = (tx.get("to_label") or "").lower()
+            from_lbl = (tx.get("from_label") or "").lower()
+            total_usd += amt_usd
+
+            to_ex = any(ex in to_lbl for ex in _EXCHANGE_LABELS)
+            from_ex = any(ex in from_lbl for ex in _EXCHANGE_LABELS)
+
+            if to_ex and not from_ex:
+                inflow_usd += amt_usd
+                if sym == "ETH":
+                    eth_inflow += amt_native
+            elif from_ex and not to_ex:
+                outflow_usd += amt_usd
+                if sym == "ETH":
+                    eth_outflow += amt_native
+
+        net = inflow_usd - outflow_usd
+        if net > 5_000_000:
+            signal, buy_adj, sell_adj = "bearish", -1, 1
+        elif net < -5_000_000:
+            signal, buy_adj, sell_adj = "bullish", 1, -1
+        else:
+            signal, buy_adj, sell_adj = "neutral", 0, 0
+
+        return {
+            "inflow_usd": inflow_usd,
+            "outflow_usd": outflow_usd,
+            "net_flow_usd": net,
+            "eth_inflow": eth_inflow,
+            "eth_outflow": eth_outflow,
+            "total_volume_usd": total_usd,
+            "large_tx_count": len(items),
+            "flow_signal": signal,
+            "buy_adj": buy_adj,
+            "sell_adj": sell_adj,
+        }
+    except Exception as e:
+        logging.error(f"[WHALE] Error fetching whale flow: {e}")
+        return _empty
+
+
+
 # ------------------------------------------------------------------
 # 3b) D1 BIAS + CANDLE SIGNALS
 # ------------------------------------------------------------------
@@ -1002,6 +1076,14 @@ Dưới đây là dữ liệu thị trường thực tế của {symbol} trên k
 - Buy score: {snap.get('buy_score', 0)} / 13
 - Sell score: {snap.get('sell_score', 0)} / 13
 
+## Dòng tiền Whale (on-chain, ~50 giao dịch gần nhất)
+- Số lượng giao dịch lớn: {snap.get('whale_tx_count', 0)} tx
+- Tổng volume whale: ${snap.get('whale_total_vol_usd', 0):,.0f}
+- 📥 Inflow vào sàn (bán): ${snap.get('whale_inflow_usd', 0):,.0f} | ETH: {snap.get('whale_eth_inflow', 0):,.1f}
+- 📤 Outflow khỏi sàn (gom): ${snap.get('whale_outflow_usd', 0):,.0f} | ETH: {snap.get('whale_eth_outflow', 0):,.1f}
+- Net flow (dương = áp lực bán): ${snap.get('whale_net_flow_usd', 0):+,.0f}
+- Tín hiệu dòng tiền: **{snap.get('whale_flow_signal', 'neutral').upper()}**
+
 ---
 Viết phân tích thị trường theo đúng cấu trúc sau, bằng tiếng Việt, súc tích và chuyên nghiệp:
 
@@ -1014,13 +1096,16 @@ Nhận xét từng chỉ báo: RSI, MACD, Stochastic, Williams %R, Bollinger Ban
 ### 3. 📍 Vùng giá quan trọng
 Phân tích vùng mua/bán động, mức hỗ trợ/kháng cự cần theo dõi.
 
-### 4. 💡 Khuyến nghị giao dịch
+### 4. 🐋 Dòng tiền Whale
+Nhận xét về net flow on-chain: whale đang gom hay xả, áp lực mua/bán từ dòng tiền lớn.
+
+### 5. 💡 Khuyến nghị giao dịch
 Đưa ra khuyến nghị rõ ràng: BUY / HOLD / SELL, điều kiện vào lệnh, mức chốt lời/cắt lỗ tham khảo.
 
-### 5. ⚠️ Rủi ro cần lưu ý
+### 6. ⚠️ Rủi ro cần lưu ý
 Các yếu tố có thể làm vô hiệu phân tích trên.
 
-Không nhắc lại bảng số liệu. Dùng emoji phù hợp. Tối đa 400 từ."""
+Không nhắc lại bảng số liệu. Dùng emoji phù hợp. Tối đa 450 từ."""
 
     try:
         resp = requests.post(
@@ -1595,12 +1680,13 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
             logging.error(f"[SYMBOL DASH] Error fetching BTC context: {e}")
             return None, None
 
-    klines, d1_result, btc_result, fng_data, funding_data = await asyncio.gather(
+    klines, d1_result, btc_result, fng_data, funding_data, whale_data = await asyncio.gather(
         asyncio.to_thread(_safe_klines),
         asyncio.to_thread(_safe_d1_bias),
         asyncio.to_thread(_safe_btc_context),
         asyncio.to_thread(_fetch_fear_greed),
         asyncio.to_thread(_fetch_funding_rate, symbol),
+        asyncio.to_thread(_fetch_whale_flow),
     )
     d1_bullish, d1_bearish = d1_result
     btc_rsi_h4, btc_macd_hist_val = btc_result
@@ -1864,6 +1950,15 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
         "tracker_action":  tracker_action,
         "buy_score":       last_signal.get("buy_score", 0),
         "sell_score":      last_signal.get("sell_score", 0),
+        # Whale on-chain flow
+        "whale_inflow_usd":     whale_data.get("inflow_usd", 0.0),
+        "whale_outflow_usd":    whale_data.get("outflow_usd", 0.0),
+        "whale_net_flow_usd":   whale_data.get("net_flow_usd", 0.0),
+        "whale_eth_inflow":     whale_data.get("eth_inflow", 0.0),
+        "whale_eth_outflow":    whale_data.get("eth_outflow", 0.0),
+        "whale_total_vol_usd":  whale_data.get("total_volume_usd", 0.0),
+        "whale_tx_count":       whale_data.get("large_tx_count", 0),
+        "whale_flow_signal":    whale_data.get("flow_signal", "neutral"),
     }
     ai_analysis = call_openrouter_analysis(symbol, tf, ai_snap)
 
@@ -1888,6 +1983,14 @@ async def symbol_dashboard(request: Request, symbol: str, tf: str = Query("4h"))
         "db_signals_json": db_signals_json,
         "fng_value": fng_data.get("value", 50),
         "funding_rate_pct": funding_data.get("funding_rate_pct", 0.0),
+        # Whale on-chain flow
+        "whale_inflow_usd": whale_data.get("inflow_usd", 0.0),
+        "whale_outflow_usd": whale_data.get("outflow_usd", 0.0),
+        "whale_net_flow_usd": whale_data.get("net_flow_usd", 0.0),
+        "whale_eth_inflow": whale_data.get("eth_inflow", 0.0),
+        "whale_eth_outflow": whale_data.get("eth_outflow", 0.0),
+        "whale_tx_count": whale_data.get("large_tx_count", 0),
+        "whale_flow_signal": whale_data.get("flow_signal", "neutral"),
     }
 
     return templates.TemplateResponse("symbol_dashboard.html", context)
